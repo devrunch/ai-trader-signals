@@ -17,8 +17,9 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
+import boto3
+from openai import OpenAI
 import pandas as pd
-import redis.asyncio as aioredis
 
 from app.config import settings
 
@@ -44,11 +45,22 @@ class GeneratedSignal:
     indicators: dict
 
 
+def _boto_session():
+    kwargs = {"region_name": settings.aws_region}
+    if settings.aws_access_key_id:
+        kwargs["aws_access_key_id"] = settings.aws_access_key_id
+        kwargs["aws_secret_access_key"] = settings.aws_secret_access_key
+    return boto3.session.Session(**kwargs)
+
+
 class SignalService:
     def __init__(self):
-        self._redis = aioredis.from_url(settings.redis_url)
-        self._finbert = None   # loaded lazily on first use
-        self._claude = None    # anthropic client, loaded lazily
+        self._sqs = _boto_session().client("sqs")
+        self._llm = OpenAI(
+            api_key=settings.bedrock_api_key,
+            base_url=settings.bedrock_base_url,
+        )
+        self._finbert = None  # loaded lazily on first use
 
     # ------------------------------------------------------------------
     # Public entry point — Celery tasks call only this
@@ -173,7 +185,8 @@ class SignalService:
             return [a["title"] for a in articles if a.get("title")]
 
     # ------------------------------------------------------------------
-    # Step 4: Claude reasoning
+    # Step 4: LLM call via Bedrock Converse API (model-agnostic)
+    # Works with Nova, DeepSeek R1, Llama, Claude — just change BEDROCK_MODEL_ID
     # ------------------------------------------------------------------
     async def _call_claude(
         self,
@@ -183,14 +196,10 @@ class SignalService:
         indicators: dict,
         sentiment: dict,
     ) -> Optional[GeneratedSignal]:
-        if self._claude is None:
-            import anthropic
-            self._claude = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
-
         ltp = indicators["ltp"]
-        prompt = f"""You are an expert Indian intraday equity trader analysing {symbol} ({exchange}).
+        user_prompt = f"""Analyse {symbol} ({exchange}) for an intraday trade.
 
-CURRENT PRICE: ₹{ltp}
+CURRENT PRICE: {ltp}
 
 TECHNICAL INDICATORS:
 - RSI(14): {indicators['rsi']}
@@ -205,35 +214,37 @@ NEWS SENTIMENT: {sentiment['label'].upper()} (score: {sentiment['score']}, from 
 RECENT OHLCV (last 5 candles, 15m):
 {df[['open','high','low','close','volume']].tail(5).to_string()}
 
-Analyse and respond with ONLY valid JSON:
-{{
-  "signal_type": "BUY" | "SELL" | "HOLD",
-  "confidence": <0.0-1.0>,
-  "entry_price": <float>,
-  "target_price": <float>,
-  "stop_loss": <float>,
-  "reasoning": "<2-3 sentences explaining the signal>"
-}}
+Respond with ONLY a valid JSON object — no markdown, no extra text:
+{{"signal_type":"BUY"|"SELL"|"HOLD","confidence":0.0-1.0,"entry_price":float,"target_price":float,"stop_loss":float,"reasoning":"2-3 sentences"}}
 
-Rules: Only BUY/SELL if confidence >= 0.65. Minimum R:R = 1.5. For intraday only."""
-
-        response = await self._claude.messages.create(
-            model=settings.anthropic_model,
-            max_tokens=512,
-            system=[{
-                "type": "text",
-                "text": "You are an expert Indian equity trader. Respond ONLY with valid JSON.",
-                "cache_control": {"type": "ephemeral"},
-            }],
-            messages=[{"role": "user", "content": prompt}],
-        )
+Rules: BUY/SELL only when confidence >= 0.65. Minimum reward-to-risk = 1.5. Intraday positions only."""
 
         try:
-            data = json.loads(response.content[0].text)
+            resp = self._llm.chat.completions.create(
+                model=settings.bedrock_model_id,
+                max_tokens=512,
+                messages=[
+                    {"role": "system", "content": "You are an expert Indian equity trader. Respond ONLY with valid JSON — no markdown, no explanation."},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            text = resp.choices[0].message.content.strip()
+            # Strip markdown code fences some models add
+            if text.startswith("```"):
+                text = text.split("```")[1]
+                if text.startswith("json"):
+                    text = text[4:]
+            data = json.loads(text)
+        except Exception as e:
+            logger.warning("LLM call failed for %s: %s", symbol, e)
+            return None
+
+        try:
             rr = (data["target_price"] - data["entry_price"]) / max(
                 data["entry_price"] - data["stop_loss"], 0.01
             )
             if rr < settings.min_reward_risk:
+                logger.info("Signal for %s rejected — R:R %.2f < %.2f", symbol, rr, settings.min_reward_risk)
                 return None
 
             return GeneratedSignal(
@@ -247,18 +258,22 @@ Rules: Only BUY/SELL if confidence >= 0.65. Minimum R:R = 1.5. For intraday only
                 reasoning=data["reasoning"],
                 indicators=indicators,
             )
-        except (json.JSONDecodeError, KeyError, ValueError) as e:
-            logger.warning("Claude response parse error for %s: %s", symbol, e)
+        except (KeyError, ValueError) as e:
+            logger.warning("Bedrock response parse error for %s: %s", symbol, e)
             return None
 
     # ------------------------------------------------------------------
-    # Step 5: Publish to Redis → NestJS picks up
+    # Step 5: Publish to SQS → NestJS Lambda picks up
     # ------------------------------------------------------------------
     async def _publish(self, signal: GeneratedSignal) -> None:
+        if not settings.sqs_signals_queue_url:
+            logger.warning("SQS_SIGNALS_QUEUE_URL not set — signal not published")
+            return
+
         payload = json.dumps({
             "symbol": signal.symbol,
             "exchange": signal.exchange,
-            "signal_type": signal.signal_type.value,
+            "direction": signal.signal_type.value,
             "confidence": signal.confidence,
             "entry_price": signal.entry_price,
             "target_price": signal.target_price,
@@ -266,5 +281,14 @@ Rules: Only BUY/SELL if confidence >= 0.65. Minimum R:R = 1.5. For intraday only
             "reasoning": signal.reasoning,
             "indicators": signal.indicators,
         })
-        await self._redis.publish("signals:new", payload)
-        logger.info("Published %s signal for %s (conf=%.2f)", signal.signal_type, signal.symbol, signal.confidence)
+
+        self._sqs.send_message(
+            QueueUrl=settings.sqs_signals_queue_url,
+            MessageBody=payload,
+            MessageGroupId="signals",           # for FIFO queue
+            MessageDeduplicationId=f"{signal.symbol}-{signal.signal_type.value}-{int(signal.entry_price)}",
+        ) if ".fifo" in settings.sqs_signals_queue_url else self._sqs.send_message(
+            QueueUrl=settings.sqs_signals_queue_url,
+            MessageBody=payload,
+        )
+        logger.info("SQS published %s signal for %s (conf=%.2f)", signal.signal_type, signal.symbol, signal.confidence)

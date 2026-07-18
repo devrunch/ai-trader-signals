@@ -3,12 +3,21 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     environment: str = "development"
-    redis_url: str = "redis://localhost:6379/0"
-    api_service_url: str = "http://localhost:8000"
 
-    # LLM
-    anthropic_api_key: str = ""
-    anthropic_model: str = "claude-sonnet-4-5"
+    # AWS
+    aws_region: str = "ap-south-1"
+    aws_access_key_id: str = ""
+    aws_secret_access_key: str = ""
+
+    # SQS — replaces Redis pub/sub
+    sqs_signals_queue_url: str = ""          # signals:new equivalent
+    sqs_tasks_queue_url: str = ""            # on-demand generate_single tasks
+
+    # Bedrock Mantle — OpenAI-compatible endpoint (ap-south-1)
+    # Available: deepseek.v3.2 | mistral.mistral-large-3-675b-instruct | qwen.qwen3-235b-a22b-2507
+    bedrock_api_key: str = ""
+    bedrock_model_id: str = "deepseek.v3.2"
+    bedrock_base_url: str = "https://bedrock-mantle.ap-south-1.api.aws/v1"
 
     # Market data
     news_api_key: str = ""
@@ -23,7 +32,7 @@ class Settings(BaseSettings):
     # OANDA Forex (demo account)
     oanda_api_key: str = ""
     oanda_account_id: str = ""
-    oanda_env: str = "practice"  # "practice" = demo, "live" = live
+    oanda_env: str = "practice"
 
     class Config:
         env_file = ".env"
