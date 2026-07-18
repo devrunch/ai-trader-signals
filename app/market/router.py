@@ -1,5 +1,7 @@
 from fastapi import APIRouter, HTTPException, Query
+from typing import Optional
 from app.market.service import get_quote, get_historical, get_batch_quotes
+from app.market.news import get_market_news
 
 router = APIRouter()
 
@@ -34,6 +36,17 @@ async def historical(
 async def batch_quotes(symbols: list[str], exchange: str = Query(default="NSE")):
     """Batch quote fetch for screener — returns available quotes."""
     return await get_batch_quotes(symbols, exchange.upper())
+
+
+@router.get("/news")
+async def news(
+    symbols: Optional[str] = Query(default=None, description="Comma-separated NSE tickers"),
+    limit: int = Query(default=15, le=30),
+):
+    """Market news with FinBERT sentiment scoring. Requires NEWS_API_KEY in env."""
+    sym_list = [s.strip().upper() for s in symbols.split(",")] if symbols else None
+    articles = await get_market_news(sym_list, limit)
+    return {"articles": articles, "count": len(articles)}
 
 
 @router.get("/status")
