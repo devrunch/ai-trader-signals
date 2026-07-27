@@ -1,0 +1,82 @@
+# Tooling configuration for ai-trader-signals.
+#
+# There is no build backend here on purpose — the service is deployed as a
+# source tree in a container, not as a wheel. This file exists so `ruff` and
+# `mypy` have one agreed configuration instead of per-developer flags.
+#
+#   pip install -r requirements-dev.txt
+#   ruff check app main.py
+#   ruff format --check app main.py
+#   mypy app
+
+[tool.ruff]
+# 120, matching the code that is already here — the indicator and cue tables
+# are aligned columns that read far worse wrapped at 88.
+line-length = 120
+target-version = "py313"
+src = ["."]
+include = ["app/**/*.py", "main.py"]
+
+[tool.ruff.lint]
+# Default rules (E4/E7/E9 + F) plus:
+#   I  — import sorting. MED-3 is 28 function-local imports; keeping the
+#        module-level block ordered is what makes the dependency graph
+#        readable enough to notice the next one.
+#   UP — pyupgrade, so new code does not reintroduce the deprecated
+#        asyncio.get_event_loop()-era idioms this codebase is removing.
+#   B  — bugbear, for the mutable-default and loop-variable-capture classes of
+#        bug (the `lambda s=drv:` workaround in global_cues.py was one).
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# The vendor/driver tables are deliberately column-aligned; E501 on those lines
+# would push us into reformatting documentation-grade comments.
+"app/market/global_cues.py" = ["E501"]
+# Same reasoning, different rule. The indicator catalogue and the screener's
+# criteria table are one-line-per-entry lookup tables; E701 wants each `def x:
+# return {...}` and each `if criteria == "...": return ...` split across two
+# lines, which turns two readable aligned tables into 60 lines of scroll.
+"app/signals/indicators.py" = ["E701"]
+# The operator dispatch in the condition engine is a one-line-per-operator
+# lookup table; splitting each arm across two lines turns a readable mapping
+# into 24 lines of scroll.
+"app/signals/conditions.py" = ["E701"]
+"app/signals/agent/toolbox.py" = ["E701"]
+# `market=market_data_router` / `context=None` style DI defaults. B008 targets
+# mutable defaults built by a call; these are module singletons deliberately
+# used as the production default so tests can substitute a fake.
+"app/signals/service.py" = ["B008"]
+# FastAPI's `Depends()` in a default argument is the framework's own idiom.
+"app/signals/router.py" = ["B008", "E701"]
+# `add()` closes over the loop variable and is invoked inside the same
+# iteration, which is the safe case B023 cannot distinguish. `l` for `low`
+# matches the `o, h, l, c` OHLC convention used throughout this file.
+"app/signals/patterns.py" = ["B023", "E741"]
+"app/signals/analysis.py" = ["E741"]
+# SignalType is `str, Enum` on purpose — StrEnum is 3.11+ only and this value
+# is serialised to JSON and compared against strings from the LLM.
+"app/signals/types.py" = ["UP042"]
+# Same reason: EventKind is serialised straight to JSON for the SSE stream
+# and compared against strings on the way back in. StrEnum is 3.11+ only.
+"app/signals/agent/events.py" = ["UP042"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.mypy]
+# Scoped to app/. yfinance, pandas_ta and cachetools ship no usable stubs, and
+# chasing them is not what this is for — it is here to catch the indicator-dict
+# key drift described in HIGH-2/MED-8.
+files = ["app"]
+python_version = "3.13"
+ignore_missing_imports = true
+# Deliberately permissive to start: the point is to be runnable today on a
+# codebase with no annotations, and to tighten as types land.
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

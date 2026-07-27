@@ -7,12 +7,8 @@ kombu[sqs]>=5.4.0
 httpx>=0.27.0
 openai>=1.40.0
 boto3>=1.35.0
-transformers>=4.44.0
-torch>=2.6.0
 pandas>=2.2.3
 pandas-ta==0.4.71b0
 yfinance>=0.2.43
-motor>=3.5.0
-pymongo>=4.8.0
-oandapyV20==0.6.3
 pytz>=2024.1
+cachetools>=5.5.0

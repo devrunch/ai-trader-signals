@@ -1,20 +1,25 @@
 """
-News feed with FinBERT sentiment scoring.
-Falls back to NewsAPI.org if FINBERT is unavailable.
+News feed with FinBERT sentiment scoring via HF Inference API.
+No local torch/transformers — calls the free HF hosted inference endpoint.
 """
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 import httpx
 
-from app.config import settings
+from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-NEWSAPI_URL = "https://newsapi.org/v2/everything"
+# Failures we expect from a third-party HTTP API: the network, a non-2xx, a
+# body that is not the JSON shape documented. Anything else is our bug.
+_API_ERRORS = (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError)
+
+NEWSAPI_URL  = "https://newsapi.org/v2/everything"
+# HF retired api-inference.huggingface.co — inference now routes through router.huggingface.co
+HF_INFER_URL = "https://router.huggingface.co/hf-inference/models"
 
 INDIA_MARKET_QUERY = (
     "NSE OR BSE OR Nifty OR Sensex OR \"Indian stock\" OR SEBI OR "
@@ -23,9 +28,10 @@ INDIA_MARKET_QUERY = (
 
 
 async def _fetch_newsapi(query: str, page_size: int = 20) -> list[dict]:
+    settings = get_settings()
     if not settings.news_api_key:
         return []
-    params = {
+    params: dict[str, str | int] = {
         "q": query,
         "language": "en",
         "sortBy": "publishedAt",
@@ -38,26 +44,47 @@ async def _fetch_newsapi(query: str, page_size: int = 20) -> list[dict]:
         return r.json().get("articles", [])
 
 
-def _finbert_sentiment(text: str) -> tuple[str, float]:
-    """Returns (label, score). Lazy-loads FinBERT; falls back to NEUTRAL on error."""
+async def _hf_sentiment_batch(texts: list[str]) -> list[tuple[str, float]] | None:
+    """
+    Call HF Inference API in one batch request.
+    Returns list of (label, score) where label is POSITIVE/NEGATIVE/NEUTRAL.
+
+    Returns **None** when scoring did not happen — an unset token, a network
+    failure, HF rate-limiting us. It used to return a full list of
+    ("NEUTRAL", 0.0), which is indistinguishable from genuinely neutral news:
+    a dead sentiment pipeline read to every caller as "the market feels fine".
+    Callers must decide what unavailable sentiment means for them.
+    """
+    if not texts:
+        return []
+    settings = get_settings()
+    url = f"{HF_INFER_URL}/{settings.finbert_model}"
+    headers = {"Authorization": f"Bearer {settings.hf_api_token}"} if settings.hf_api_token else {}
     try:
-        from transformers import pipeline
-        _pipe = getattr(_finbert_sentiment, "_pipe", None)
-        if _pipe is None:
-            _pipe = pipeline(
-                "text-classification",
-                model=settings.finbert_model,
-                truncation=True,
-                max_length=512,
-            )
-            _finbert_sentiment._pipe = _pipe  # type: ignore[attr-defined]
-        result = _pipe(text[:512])[0]
-        label = result["label"].upper()   # positive | negative | neutral
-        score = float(result["score"])
-        return label, score if label == "POSITIVE" else (-score if label == "NEGATIVE" else 0.0)
-    except Exception as e:
-        logger.debug("FinBERT skipped: %s", e)
-        return "NEUTRAL", 0.0
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(url, json={"inputs": texts}, headers=headers)
+            resp.raise_for_status()
+            raw = resp.json()
+            # raw is [[{label, score}, ...], ...] — one list per input text
+            results = []
+            for item in raw:
+                best = max(item, key=lambda x: x["score"])
+                label = best["label"].upper()
+                score = float(best["score"])
+                results.append((label, score if label == "POSITIVE" else (-score if label == "NEGATIVE" else 0.0)))
+            if len(results) != len(texts):
+                logger.warning(
+                    "HF sentiment returned %d scores for %d texts — discarding",
+                    len(results), len(texts),
+                )
+                return None
+            return results
+    except _API_ERRORS as e:
+        logger.warning("HF sentiment batch failed: %s", e)
+        return None
+    except Exception:
+        logger.exception("Unexpected error scoring sentiment for %d texts", len(texts))
+        return None
 
 
 def _extract_symbols(text: str) -> list[str]:
@@ -72,10 +99,18 @@ def _extract_symbols(text: str) -> list[str]:
     return [s for s in KNOWN if s in upper]
 
 
-async def get_market_news(symbols: Optional[list[str]] = None, page_size: int = 15) -> list[dict]:
+async def get_market_news_result(
+    symbols: list[str] | None = None, page_size: int = 15
+) -> dict:
     """
-    Fetch market news and score sentiment.
+    Fetch market news and score sentiment, reporting what failed.
+
     symbols: optional list to narrow query (e.g. ["RELIANCE", "INFY"])
+
+    Returns `{articles, count, degraded, degraded_reason}`. `degraded` is the
+    point of this function: both failure modes below used to return a plain
+    list — empty for a news outage, NEUTRAL-scored for a sentiment outage — and
+    the caller could not tell either apart from a quiet news day.
     """
     if symbols:
         query = " OR ".join(symbols[:5])
@@ -84,23 +119,35 @@ async def get_market_news(symbols: Optional[list[str]] = None, page_size: int = 
 
     try:
         articles = await _fetch_newsapi(query, page_size)
-    except Exception as e:
+    except _API_ERRORS as e:
         logger.warning("NewsAPI fetch failed: %s", e)
-        return []
+        return {"articles": [], "count": 0, "degraded": True, "degraded_reason": "news_unavailable"}
+    except Exception:
+        logger.exception("Unexpected error fetching news for query %r", query)
+        return {"articles": [], "count": 0, "degraded": True, "degraded_reason": "news_unavailable"}
+
+    texts = [f"{a.get('title') or ''}. {a.get('description') or ''}" for a in articles]
+    scored = await _hf_sentiment_batch(texts)
+    sentiment_ok = scored is not None
+    sentiments: list[tuple[str, float]] = scored if scored is not None else [("NEUTRAL", 0.0)] * len(texts)
 
     results = []
-    for a in articles:
-        headline = a.get("title") or ""
+    # strict=True: `_hf_sentiment_batch` already rejects a length mismatch, and
+    # the neutral fallback is built from `texts`, so the two are the same length
+    # by construction. If that ever stops being true the scores would be
+    # silently attached to the wrong headlines.
+    for a, (label, score) in zip(articles, sentiments, strict=True):
+        headline    = a.get("title") or ""
         description = a.get("description") or ""
-        text = f"{headline}. {description}"
-
-        label, score = _finbert_sentiment(text)
+        text        = f"{headline}. {description}"
 
         published = a.get("publishedAt", "")
         try:
             dt = datetime.fromisoformat(published.replace("Z", "+00:00"))
-            published_iso = dt.astimezone(timezone.utc).isoformat()
-        except Exception:
+            published_iso = dt.astimezone(UTC).isoformat()
+        except (ValueError, AttributeError, TypeError):
+            # NewsAPI has been seen returning a non-ISO string; passing it
+            # through unparsed is better than dropping the article.
             published_iso = published
 
         results.append({
@@ -112,7 +159,20 @@ async def get_market_news(symbols: Optional[list[str]] = None, page_size: int = 
             "publishedAt": published_iso,
             "sentiment": label,
             "sentimentScore": round(score, 4),
+            # False means the NEUTRAL above is "we could not score it", not
+            # "FinBERT read it as neutral".
+            "sentimentAvailable": sentiment_ok,
             "symbols": _extract_symbols(text),
         })
 
-    return results
+    return {
+        "articles": results,
+        "count": len(results),
+        "degraded": not sentiment_ok,
+        "degraded_reason": None if sentiment_ok else "sentiment_unavailable",
+    }
+
+
+async def get_market_news(symbols: list[str] | None = None, page_size: int = 15) -> list[dict]:
+    """Articles only. Prefer `get_market_news_result` — it says what degraded."""
+    return (await get_market_news_result(symbols, page_size))["articles"]

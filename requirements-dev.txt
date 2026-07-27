@@ -1,0 +1,9 @@
+# Development and CI only. requirements.txt stays production-only so the
+# runtime image does not ship a linter and a test runner.
+#   pip install -r requirements.txt -r requirements-dev.txt
+-r requirements.txt
+
+ruff>=0.6.0
+mypy>=1.11.0
+pytest>=8.3.0
+pytest-asyncio>=0.24.0
