@@ -31,6 +31,21 @@ def _equity_ticker(symbol: str, exchange: str) -> str:
     return f"{symbol.upper()}{suffix}"
 
 
+# Yahoo's own exchange codes -> the four we actually support. Search returns
+# results from every exchange Yahoo lists (Frankfurt, Vienna, Warsaw, ETFs on
+# any of them); anything not in this map is dropped rather than shown as a
+# suggestion the app cannot correctly chart.
+_YAHOO_EXCHANGE = {
+    "NMS": "NASDAQ",  # NASDAQ Global Select
+    "NGM": "NASDAQ",  # NASDAQ Global Market
+    "NCM": "NASDAQ",  # NASDAQ Capital Market
+    "NYQ": "NYSE",
+    "ASE": "NYSE",    # NYSE American, close enough for viewing
+    "NSI": "NSE",
+    "BSE": "BSE",
+}
+
+
 def _forex_ticker(pair: str) -> str:
     """EURUSD → EURUSD=X  (yFinance format)"""
     pair = pair.upper().replace("/", "").replace("-", "")
@@ -149,6 +164,50 @@ class YFinanceProvider:
     async def get_quote(self, symbol: str, exchange: str = "NSE") -> dict | None:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._get_quote_sync, symbol, exchange)
+
+    async def search(self, query: str, limit: int = 8) -> list[dict]:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._search_sync, query, limit)
+
+    def _search_sync(self, query: str, limit: int) -> list[dict]:
+        """Company name / symbol -> the matches we can actually chart.
+
+        Yahoo's search returns results across every exchange it lists —
+        Frankfurt, Vienna, Warsaw, ETFs, depositary receipts. Only NSE, BSE,
+        NASDAQ and NYSE map cleanly onto `_ticker_for`; anything else would
+        either 404 when selected or (worse) silently chart the wrong
+        instrument, so it is filtered out here rather than left for the
+        frontend to guess about.
+        """
+        try:
+            results = yf.Search(query, max_results=limit * 2).quotes
+        except _VENDOR_ERRORS as e:
+            logger.warning("Symbol search failed for %r: %s", query, e)
+            return []
+        except Exception:
+            logger.exception("Unexpected error searching for %r", query)
+            return []
+
+        out: list[dict] = []
+        seen: set[str] = set()
+        for r in results:
+            if r.get("quoteType") != "EQUITY":
+                continue
+            exchange = _YAHOO_EXCHANGE.get(r.get("exchange", ""))
+            if not exchange:
+                continue
+            symbol = str(r.get("symbol", "")).split(".")[0].upper()
+            if not symbol or symbol in seen:
+                continue
+            seen.add(symbol)
+            out.append({
+                "symbol": symbol,
+                "name": r.get("shortname") or r.get("longname") or symbol,
+                "exchange": exchange,
+            })
+            if len(out) >= limit:
+                break
+        return out
 
     async def get_historical_df(
         self, symbol: str, exchange: str = "NSE", interval: str = "15m", days: int = 30

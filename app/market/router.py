@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from app.market import calendar as market_calendar
 from app.market.news import get_market_news_result
-from app.market.service import get_batch_quotes, get_historical, get_quote
+from app.market.service import get_batch_quotes, get_historical, get_quote, search_symbols
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +22,13 @@ async def quote(
     if not data:
         raise HTTPException(status_code=404, detail=f"No data found for {symbol}/{exchange}")
     return data
+
+
+@router.get("/search")
+async def search(q: str = Query(min_length=1, max_length=40)):
+    """Company name or symbol -> matches, name attached, on an exchange this
+    app can actually chart. Powers the terminal's search box."""
+    return {"results": await search_symbols(q)}
 
 
 @router.get("/historical/{symbol}")

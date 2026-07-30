@@ -18,6 +18,11 @@ async def get_quote(symbol: str, exchange: str = "NSE") -> dict | None:
     return await market_data_router.get_quote(symbol, exchange)
 
 
+async def search_symbols(query: str, limit: int = 8) -> list[dict]:
+    """Company name / symbol -> matches on exchanges this app can actually chart."""
+    return await market_data_router.search(query, limit)
+
+
 async def get_historical(
     symbol: str,
     exchange: str = "NSE",

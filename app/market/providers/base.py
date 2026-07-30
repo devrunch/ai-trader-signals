@@ -25,3 +25,8 @@ class MarketDataProvider(Protocol):
         columns: open, high, low, close, volume.
         """
         ...
+
+    async def search(self, query: str, limit: int) -> list[dict]:
+        """Company name / symbol -> [{symbol, name, exchange}], exchanges this
+        vendor actually covers only — never a result the caller cannot chart."""
+        ...

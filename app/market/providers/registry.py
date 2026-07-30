@@ -84,6 +84,12 @@ class MarketDataRouter:
     def _provider_for(self, exchange: str) -> MarketDataProvider:
         return self.providers.get(exchange.upper(), self.fallback)
 
+    async def search(self, query: str, limit: int = 8) -> list[dict]:
+        """Symbol/company search. Not exchange-routed like everything else
+        here — the caller does not know the exchange yet, that is what this
+        answers — so it always asks the fallback vendor directly."""
+        return await self.fallback.search(query, limit)
+
     # ------------------------------------------------------------------
     # Cache plumbing
     # ------------------------------------------------------------------
