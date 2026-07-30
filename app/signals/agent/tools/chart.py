@@ -107,7 +107,13 @@ async def plot_series(ctx: ToolContext, args: dict) -> Any:
     """
     name = str(args.get("series") or "")
     params = args.get("params") or {}
-    label = args.get("label") or name
+    requested_label = str(args.get("label") or name)
+    # The model can write ANY free-text label — nothing stops it from naming a
+    # plain `close` line "Keltner Upper Band" when it can't actually compute
+    # one. The number stays real either way, but a false name on a real number
+    # is still a lie the chart would tell. The true series name is appended so
+    # the label can never fully detach from what was actually plotted.
+    label = requested_label if requested_label.strip().lower() == name.lower() else f"{requested_label} ({name})"
 
     df = await ctx.frame(args.get("symbol"), args.get("interval") or "15m")
     if df is None or df.empty:

@@ -315,9 +315,9 @@ TOOL_SCHEMAS: list[dict] = [
                 "Use this for anything not covered by draw_on_chart or add_chart_indicator — e.g. "
                 "'the 5-bar highest high and lowest low' is two calls: series=highest length=5, "
                 "then series=lowest length=5. Values are computed server-side from real bars; you "
-                "only choose which series and what parameters. The result's last_value IS the "
-                "line's current value — quote that, don't call get_indicators for the same number on "
-                "a different interval, or your commentary will disagree with the chart you just drew."
+                "only choose which series and what parameters. Quote last_value for the current "
+                "reading, not a fresh get_indicators call. A request needing arithmetic between "
+                "series (e.g. Keltner) can't be computed — say so; never relabel one series as another."
             ),
             "parameters": {
                 "type": "object",

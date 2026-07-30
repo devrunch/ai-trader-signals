@@ -44,7 +44,7 @@ async def test_the_5_bar_high_low_channel_the_demo_needed(trending_frame):
     assert low["points_plotted"] > 0
 
     lines = [d for d in box.drawings if d["kind"] == "series"]
-    assert {d["label"] for d in lines} == {"5-bar high", "5-bar low"}
+    assert {d["label"] for d in lines} == {"5-bar high (highest)", "5-bar low (lowest)"}
 
 
 @pytest.mark.asyncio
@@ -73,6 +73,24 @@ async def test_last_value_matches_the_line_it_just_drew(trending_frame):
 
     drawn_points = [d for d in box.drawings if d["kind"] == "series"][0]["points"]
     assert out["last_value"] == drawn_points[-1]["value"]
+
+
+@pytest.mark.asyncio
+async def test_a_false_label_cannot_hide_what_was_really_plotted(trending_frame):
+    """The bug this closes: live, the model wanted a Keltner band (SMA +/- 2xATR
+    — not computable, no arithmetic between series), hit the per-turn call
+    limit on a third attempt, then relabeled a plain `close` line "Keltner
+    Upper (SMA + 2xATR)". The number was real; the name was a lie. The true
+    series name must survive in the label no matter what the model calls it."""
+    box = _toolbox(trending_frame)
+    out = await box.execute("plot_series", {
+        "series": "close", "label": "Keltner Upper (SMA + 2x ATR)",
+    })
+    assert "error" not in out
+    assert out["drawn"] == "close"
+
+    drawing = [d for d in box.drawings if d["kind"] == "series"][0]
+    assert drawing["label"] == "Keltner Upper (SMA + 2x ATR) (close)"
 
 
 @pytest.mark.asyncio
