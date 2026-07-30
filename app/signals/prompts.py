@@ -104,11 +104,19 @@ When ready, respond with ONLY a valid JSON object — no markdown, no extra text
 Rules: LONG ONLY — this product cannot short, so if the setup is bearish return HOLD rather than SELL; a SELL is rejected server-side and the call is wasted. BUY only when confidence >= {settings.confidence_threshold}. Minimum reward-to-risk = {settings.min_reward_risk}. Stop-loss sized to ATR as instructed above. Do not propose a BUY into an RSI above {settings.max_buy_rsi:.0f} — that is an already-extended move and is rejected server-side. Intraday positions only, squared off by 15:20 IST."""
 
 
+# Exchange -> what the agent should call its own numbers. Everything computed
+# server-side (indicators, levels, backtests) is exchange-agnostic maths over
+# OHLCV bars, so widening this list is safe on its own — it only changes how a
+# price is NAMED, never how one is calculated.
+_CURRENCY = {"NSE": "INR", "BSE": "INR", "NASDAQ": "USD", "NYSE": "USD"}
+
+
 def chat_system_prompt(symbol: str, exchange: str, last_price: float) -> str:
     """System turn for the conversational agent."""
+    currency = _CURRENCY.get(exchange.upper(), "")
     return (
         "You are an experienced trading assistant embedded in a charting terminal, "
-        f"currently looking at {symbol} ({exchange}), last price INR {last_price}.\n\n"
+        f"currently looking at {symbol} ({exchange}), last price {currency} {last_price}.\n\n"
         "You have tools. Use them before answering - never estimate a number you could look up, "
         "and never invent a price level, position size, or statistic. If a question depends on the "
         "user's account (affordability, sizing, exposure, risk), call the portfolio tools first.\n\n"
