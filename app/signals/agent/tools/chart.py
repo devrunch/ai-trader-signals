@@ -10,12 +10,21 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.signals import analysis
+import pandas as pd
+
+from app.signals import analysis, conditions
 from app.signals.agent.tools.base import Handler, ToolContext
 
 SUPPORT = "#16c784"
 RESIST = "#f0525d"
 TREND = "#6c5ce7"
+SERIES_LINE = "#e0ab4a"
+
+# A line needs enough points to read as a line, unlike a handful of trade
+# markers — but each point becomes its own chart overlay object on the
+# frontend (see `applyDrawings`'s "series" case), so this is still a cap, not
+# "plot everything ever fetched".
+MAX_SERIES_POINTS = 180
 
 # KLineChart's built-in indicator names. Anything outside this set would be
 # accepted here and then silently fail to render.
@@ -79,7 +88,52 @@ async def add_chart_indicator(ctx: ToolContext, args: dict) -> Any:
     return {"chart_updated": True, "added": add, "removed": remove}
 
 
+async def plot_series(ctx: ToolContext, args: dict) -> Any:
+    """Draw ANY of the validated series on the chart as a line — the general
+    escape hatch for a request that does not match `draw_on_chart`'s three
+    fixed shapes or a preset indicator toggle.
+
+    "The 5-bar highest high and lowest low" is exactly `highest`/`lowest` with
+    `length: 5` — two calls, two lines. Whatever the user names, if it maps to
+    an entry in `conditions.SERIES` this draws it; if it does not, the error
+    lists what does, so the model can retry with a real name rather than
+    inventing a tool that does not exist.
+
+    Still governed by the same safety rule as everything else here: the model
+    picks a NAME and a PARAM, both validated against an allow-list before any
+    computation happens. It never supplies a formula, and nothing here evals
+    anything — the extension is in the allow-list (`conditions.SERIES`), not in
+    what the model is trusted to do.
+    """
+    name = str(args.get("series") or "")
+    params = args.get("params") or {}
+    label = args.get("label") or name
+
+    df = await ctx.frame(args.get("symbol"), args.get("interval") or "15m")
+    if df is None or df.empty:
+        return {"error": "Not enough data to compute a series"}
+
+    try:
+        series = conditions.compute_series(df, name, params)
+    except conditions.SpecError as e:
+        return {"error": str(e), "available_series": conditions.available_series()}
+
+    values = series.dropna()
+    if values.empty:
+        return {"error": f"'{name}' produced no values — not enough bars for these parameters yet"}
+
+    points = [
+        {"timestamp": int(pd.Timestamp(ts).timestamp() * 1000), "value": round(float(v), 4)}
+        for ts, v in values.tail(MAX_SERIES_POINTS).items()
+    ]
+    ctx.drawings.append({
+        "kind": "series", "points": points, "color": SERIES_LINE, "label": label,
+    })
+    return {"drawn": name, "params": params, "points_plotted": len(points)}
+
+
 TOOLS: dict[str, Handler] = {
     "draw_on_chart": draw_on_chart,
     "add_chart_indicator": add_chart_indicator,
+    "plot_series": plot_series,
 }

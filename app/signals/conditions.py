@@ -157,6 +157,19 @@ def _volume_ratio(df, p):
     return df["volume"] / avg
 
 
+def _highest(df, p):
+    """Rolling highest high over `length` bars — the upper half of a Donchian-
+    style N-bar range, and the general building block for "N above the high"
+    style requests: whatever N and whichever line, this is the one computation
+    underneath it."""
+    return df["high"].rolling(int(p.get("length", 20))).max()
+
+
+def _lowest(df, p):
+    """Rolling lowest low over `length` bars — the lower half of the same channel."""
+    return df["low"].rolling(int(p.get("length", 20))).min()
+
+
 SERIES: dict[str, Callable[[pd.DataFrame, dict], pd.Series]] = {
     # raw price
     "close": _price("close"), "open": _price("open"),
@@ -168,6 +181,7 @@ SERIES: dict[str, Callable[[pd.DataFrame, dict], pd.Series]] = {
     "macd_signal": _macd_part("macd_signal"),
     "bb_upper": _bband("bb_upper"), "bb_mid": _bband("bb_mid"), "bb_lower": _bband("bb_lower"),
     "supertrend_dir": _supertrend_dir, "vwap": _vwap, "volume_ratio": _volume_ratio,
+    "highest": _highest, "lowest": _lowest,
 }
 
 EXIT_TYPES = {"stop_loss", "take_profit"}
@@ -175,6 +189,21 @@ EXIT_TYPES = {"stop_loss", "take_profit"}
 
 def available_series() -> list[str]:
     return sorted(SERIES)
+
+
+def compute_series(df: pd.DataFrame, name: str, params: Any = None) -> pd.Series:
+    """A single named, validated series — the entry point for anything that
+    wants ONE line, not a boolean condition tree (currently: chart drawing).
+
+    Goes through the same allow-list and the same `_check_params` bounds-check
+    as a condition's series does; a caller here gets no more trust than a
+    strategy spec does; both name and length are user/model-influenced and
+    both go through exactly one gate.
+    """
+    if name not in SERIES:
+        raise SpecError(f"Unknown series '{name}'. Available: {available_series()}")
+    checked = _check_params(name, params)
+    return _series_for(df, name, checked)
 
 
 # ---------------------------------------------------------------------------

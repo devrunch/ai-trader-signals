@@ -98,6 +98,7 @@ _TOOL_LABELS: dict[str, str] = {
     "build_strategy": "Backtesting your rules",
     "simulate_trade": "Working through the trade maths",
     "draw_on_chart": "Drawing on the chart",
+    "plot_series": "Plotting on the chart",
 }
 
 

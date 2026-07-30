@@ -303,4 +303,39 @@ TOOL_SCHEMAS: list[dict] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "plot_series",
+            "description": (
+                "Plot ANY of these as a line on the chart, over a chosen lookback window: "
+                "close, open, high, low, volume, rsi, ema, sma, atr, adx, cci, williams_r, mfi, roc, "
+                "macd, macd_hist, macd_signal, bb_upper, bb_mid, bb_lower, supertrend_dir, vwap, "
+                "volume_ratio, highest, lowest. "
+                "Use this for anything not covered by draw_on_chart or add_chart_indicator — e.g. "
+                "'the 5-bar highest high and lowest low' is two calls: series=highest length=5, "
+                "then series=lowest length=5. Values are computed server-side from real bars; you "
+                "only choose which series and what parameters."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "series": {"type": "string", "description": "One of the names listed above."},
+                    "params": {
+                        "type": "object",
+                        "description": "e.g. {\"length\": 5}. Omit for each series's normal default.",
+                        "properties": {
+                            "length": {"type": "number"}, "fast": {"type": "number"},
+                            "slow": {"type": "number"}, "signal": {"type": "number"},
+                            "std": {"type": "number"}, "multiplier": {"type": "number"},
+                        },
+                    },
+                    "label": {"type": "string", "description": "Short label shown next to the line, e.g. '5-bar high'."},
+                    "interval": {"type": "string", "enum": ["1m", "5m", "15m", "1h", "1d"]},
+                    "symbol": {"type": "string", "description": "Defaults to the chart symbol"},
+                },
+                "required": ["series"],
+            },
+        },
+    },
 ]
