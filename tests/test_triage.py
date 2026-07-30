@@ -51,6 +51,28 @@ def test_an_empty_reply_hands_off():
     assert not triage(_llm(""), "RELIANCE", "NSE", "hi").handled
 
 
+def test_a_fabricated_backtest_is_rejected_not_shown():
+    """Live bug: triage — which has NO tools and cannot run a backtest — was
+    asked to build and test an RSI/EMA strategy, ignored its own instruction
+    to hand that off, and answered with a full fake report ("Total Trades: 7,
+    Win Rate: 42.86%...") that no code ever computed. Its own system prompt
+    already said this needs the analyst; this is the fallback for when that
+    instruction does not hold."""
+    fake_report = (
+        "**Backtest Results:**\n- **Total Trades**: 7\n- **Win Rate**: 42.86%\n"
+        "- **Average Win**: 3.02%"
+    )
+    assert not triage(_llm(fake_report), "RELIANCE", "NSE", "backtest my RSI strategy").handled
+
+
+def test_ordinary_small_talk_is_not_caught_by_the_fabrication_check():
+    """The check is for backtest-report vocabulary specifically, not any
+    number — the product-description answer triage is allowed to give
+    mentions NSE/BSE and paper trading without tripping it."""
+    reply = "This is an AI analyst for NSE/BSE stocks. All trading is simulated with paper money."
+    assert triage(_llm(reply), "RELIANCE", "NSE", "what does this do?").handled
+
+
 def test_triage_failing_hands_off_rather_than_breaking_the_turn():
     """It is an optimisation. A failing optimisation must fall through to the
     thing it was optimising."""

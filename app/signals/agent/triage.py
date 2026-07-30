@@ -23,6 +23,7 @@ talk. A model reads intent; a regex reads spelling.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -30,6 +31,19 @@ logger = logging.getLogger(__name__)
 
 # The analyst is the default. Triage only diverts what it is confident about.
 HANDOFF = "HANDOFF"
+
+# Triage is handed no tools, ever — that is the entire security property this
+# module exists for. Its own prompt already says a backtest, a strategy or a
+# specific trade needs the analyst; this catches the turns where it answers
+# anyway instead of complying. Anything matching HAS to be invented, because
+# nothing on this path computed it. Same "validate before trusting" pattern as
+# an unknown series name in plot_series — the model got clear instructions,
+# this is what happens if they were not followed.
+_FABRICATED_RESULT = re.compile(
+    r"\b(win rate|total trades|winning trades|losing trades|average win|average loss|"
+    r"total return|backtest results?|trade count|num_trades|entry signals|exit signals)\b",
+    re.IGNORECASE,
+)
 
 TRIAGE_SYSTEM = (
     "You are the front desk of a trading terminal. The user is looking at a chart of "
@@ -97,6 +111,9 @@ def triage(llm, symbol: str, exchange: str, message: str,
     if not text or _is_handoff(text):
         # Still carries the response: the handoff cost tokens too, and the
         # analyst's usage should be added to it rather than replace it.
+        return TriageResult(None, response)
+    if _FABRICATED_RESULT.search(text):
+        logger.warning("Triage answered with backtest-shaped text — forcing handoff instead")
         return TriageResult(None, response)
     return TriageResult(text, response)
 
