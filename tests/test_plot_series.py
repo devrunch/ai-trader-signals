@@ -61,6 +61,21 @@ async def test_points_are_real_ohlcv_numbers_not_invented_ones(trending_frame):
 
 
 @pytest.mark.asyncio
+async def test_last_value_matches_the_line_it_just_drew(trending_frame):
+    """A model narrating "current SMA" from a SEPARATE get_indicators call risks
+    a different interval than what was just drawn — chart says one number,
+    prose says another (the bug this closes: a live Keltner-channel request
+    drew 15m lines but narrated 1h numbers from a second, mismatched call).
+    last_value must be exactly the drawn line's own last point, not a fresh
+    computation, so quoting it can never disagree with the chart."""
+    box = _toolbox(trending_frame)
+    out = await box.execute("plot_series", {"series": "sma", "params": {"length": 20}})
+
+    drawn_points = [d for d in box.drawings if d["kind"] == "series"][0]["points"]
+    assert out["last_value"] == drawn_points[-1]["value"]
+
+
+@pytest.mark.asyncio
 async def test_an_unknown_series_name_lists_what_is_actually_available(trending_frame):
     """The model's feedback loop — same principle as build_strategy's rejected
     specs: say exactly what was wrong so it can retry with a real name."""

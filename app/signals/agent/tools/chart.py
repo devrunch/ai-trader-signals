@@ -129,7 +129,14 @@ async def plot_series(ctx: ToolContext, args: dict) -> Any:
     ctx.drawings.append({
         "kind": "series", "points": points, "color": SERIES_LINE, "label": label,
     })
-    return {"drawn": name, "params": params, "points_plotted": len(points)}
+    # The model narrating "current SMA" from a SEPARATE get_indicators call risks
+    # a different interval than what was just drawn — chart says one number,
+    # prose says another. Handing back the point already on the line removes
+    # the reason to make that second call at all.
+    return {
+        "drawn": name, "params": params, "points_plotted": len(points),
+        "last_value": points[-1]["value"],
+    }
 
 
 TOOLS: dict[str, Handler] = {
