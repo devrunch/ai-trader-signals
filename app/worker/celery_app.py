@@ -68,5 +68,13 @@ celery.conf.update(
             "task": "app.worker.tasks.generate_morning_brief",
             "schedule": crontab(minute="30", hour="6", day_of_week="mon-fri"),
         },
+        # Kite Connect's access_token expires ~6am IST. 06:00 is ahead of the
+        # 06:30 morning brief and well ahead of the 09:15 open — see the
+        # design spec for why a failed refresh here is not an emergency (the
+        # router falls back to yfinance for the rest of that day).
+        "refresh-zerodha-session": {
+            "task": "app.worker.tasks.refresh_zerodha_session",
+            "schedule": crontab(minute="0", hour="6"),
+        },
     },
 )

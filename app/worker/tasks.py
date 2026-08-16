@@ -9,6 +9,7 @@ import httpx
 
 from app.config import get_settings
 from app.market import calendar as market_calendar
+from app.market.providers import kite_auth
 from app.signals.service import SignalService
 from app.worker.celery_app import celery
 
@@ -219,3 +220,39 @@ def generate_morning_brief():
     except Exception:
         logger.exception("Morning brief generation failed")
         return {"error": True}
+
+
+@celery.task(name="app.worker.tasks.refresh_zerodha_session")
+def refresh_zerodha_session():
+    """Daily Kite Connect login — 06:00 IST via Celery beat.
+
+    A thin trigger: the actual login lives in kite_auth (proven live before
+    this was written), this task just runs it and pushes the result to
+    NestJS, the same shape as square_off_positions's call to the internal
+    paper-trading endpoint above. On failure, logged loudly and returned —
+    not re-raised — because a stale token in NestJS degrades gracefully (the
+    router's Kite-then-yfinance fallback picks up every call that fails
+    against it) rather than needing this task itself to retry aggressively.
+    """
+    settings = get_settings()
+    try:
+        session = kite_auth.refresh_session(settings)
+    except kite_auth.KiteAuthError as e:
+        logger.error("Zerodha session refresh failed: %s", e)
+        return {"ok": False, "error": str(e)}
+
+    try:
+        resp = httpx.put(
+            f"{settings.api_service_url}/api/internal/broker/zerodha/session",
+            headers={"x-internal-key": settings.internal_api_key},
+            json={"accessToken": session.access_token},
+            timeout=10,
+        )
+        resp.raise_for_status()
+    except httpx.HTTPError as e:
+        logger.error("Zerodha session refreshed but NestJS write failed: %s", e)
+        return {"ok": False, "error": str(e)}
+
+    logger.info("Zerodha session refreshed and stored (%d NSE, %d BSE instruments)",
+                len(session.nse_instruments), len(session.bse_instruments))
+    return {"ok": True}
