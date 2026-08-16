@@ -28,7 +28,9 @@ from typing import Any
 import pandas as pd
 from cachetools import TTLCache
 
+from app.config import get_settings
 from app.market.providers.base import MarketDataProvider
+from app.market.providers.kite_provider import KiteProvider
 from app.market.providers.yfinance_provider import YFinanceProvider
 
 logger = logging.getLogger(__name__)
@@ -60,6 +62,10 @@ class MarketDataRouter:
         self.fallback: MarketDataProvider = YFinanceProvider()
         self.providers: dict[str, MarketDataProvider] = {}
 
+        kite = KiteProvider(get_settings())
+        self.providers["NSE"] = kite
+        self.providers["BSE"] = kite
+
         self._quote_cache: TTLCache = TTLCache(maxsize=_QUOTE_CACHE_SIZE, ttl=QUOTE_TTL_SECONDS)
         self._intraday_cache: TTLCache = TTLCache(maxsize=_HISTORY_CACHE_SIZE, ttl=INTRADAY_TTL_SECONDS)
         self._daily_cache: TTLCache = TTLCache(maxsize=_HISTORY_CACHE_SIZE, ttl=DAILY_TTL_SECONDS)
@@ -85,10 +91,18 @@ class MarketDataRouter:
         return self.providers.get(exchange.upper(), self.fallback)
 
     async def search(self, query: str, limit: int = 8) -> list[dict]:
-        """Symbol/company search. Not exchange-routed like everything else
-        here — the caller does not know the exchange yet, that is what this
-        answers — so it always asks the fallback vendor directly."""
-        return await self.fallback.search(query, limit)
+        """Symbol/company search across every exchange this app covers.
+
+        Kite has no free-text search of its own, so KiteProvider answers from
+        its own instrument dump — NSE/BSE only, real listings. The fallback
+        vendor covers NASDAQ/NYSE the same way it always has. Both are asked
+        and the results concatenated, capped at the combined limit — neither
+        vendor knows about the other's half.
+        """
+        kite = self.providers.get("NSE")
+        kite_results = await kite.search(query, limit) if kite is not None else []
+        fallback_results = await self.fallback.search(query, limit)
+        return (kite_results + fallback_results)[:limit]
 
     # ------------------------------------------------------------------
     # Cache plumbing
@@ -146,7 +160,10 @@ class MarketDataRouter:
                     if key in self._negative_cache:
                         return None
 
-                result = await self._provider_for(exchange).get_quote(symbol, exchange)
+                provider = self._provider_for(exchange)
+                result = await provider.get_quote(symbol, exchange)
+                if result is None and provider is not self.fallback:
+                    result = await self.fallback.get_quote(symbol, exchange)
                 if result is None:
                     self._negative_cache[key] = True
                 else:
@@ -195,9 +212,10 @@ class MarketDataRouter:
                     if key in self._negative_cache:
                         return None
 
-                df = await self._provider_for(exchange).get_historical_df(
-                    symbol, exchange, interval, days
-                )
+                provider = self._provider_for(exchange)
+                df = await provider.get_historical_df(symbol, exchange, interval, days)
+                if (df is None or df.empty) and provider is not self.fallback:
+                    df = await self.fallback.get_historical_df(symbol, exchange, interval, days)
                 if df is None or df.empty:
                     self._negative_cache[key] = True
                     return df
