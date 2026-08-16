@@ -33,6 +33,10 @@ logger = logging.getLogger(__name__)
 _LOGIN_URL = "https://kite.zerodha.com/api/login"
 _TWOFA_URL = "https://kite.zerodha.com/api/twofa"
 _CONNECT_LOGIN_URL = "https://kite.zerodha.com/connect/login"
+# Observed live: connect/login -> connect/finish -> the registered redirect
+# URL, with the token in the *second* hop's Location header. 5 is generous
+# headroom over that, not a tuned limit.
+_MAX_REDIRECT_HOPS = 5
 
 
 class KiteAuthError(Exception):
@@ -82,15 +86,28 @@ def refresh_session(settings: Settings) -> KiteSession:
             })
             twofa.raise_for_status()
 
-            final = client.get(
-                _CONNECT_LOGIN_URL,
-                params={"api_key": settings.zerodha_api_key, "v": 3},
-                follow_redirects=True,
-            )
-            request_token = _extract_request_token(final.history, final)
+            # Walked by hand rather than `follow_redirects=True`: the token
+            # arrives in an intermediate hop's Location header, and the
+            # registered redirect URL itself is never actually reachable
+            # from wherever this runs (a container's own "localhost" is not
+            # the api service's) — nor does it need to be, since nothing
+            # past that Location header is ever used.
+            history: list[httpx.Response] = []
+            url: str = _CONNECT_LOGIN_URL
+            params: dict[str, Any] | None = {"api_key": settings.zerodha_api_key, "v": 3}
+            final: httpx.Response | None = None
+            for _ in range(_MAX_REDIRECT_HOPS):
+                final = client.get(url, params=params, follow_redirects=False)
+                location = final.headers.get("Location")
+                if not location or "request_token=" in location:
+                    break
+                history.append(final)
+                url, params = location, None
+
+            request_token = _extract_request_token(history, final) if final else None
             if not request_token:
                 raise KiteAuthError(
-                    f"No request_token in Kite's response. Final URL: {final.url}"
+                    f"No request_token in Kite's response. Final URL: {final.url if final else url}"
                 )
     except httpx.HTTPError as e:
         raise KiteAuthError(f"Login request failed: {e}") from e
