@@ -94,6 +94,15 @@ class Settings(BaseSettings):
 
     # Market data
     news_api_key: str = ""
+    # Zerodha Kite Connect — real NSE/BSE market data. ZERODHA_USER_ID/PASSWORD/
+    # TOTP_SECRET are only used by the daily scripted login (see
+    # app/market/providers/kite_auth.py); ZERODHA_API_KEY/SECRET are also
+    # needed for the official generate_session() token exchange.
+    zerodha_api_key: str = ""
+    zerodha_api_secret: str = ""
+    zerodha_user_id: str = ""
+    zerodha_password: str = ""
+    zerodha_totp_secret: str = ""
 
     # ---- Signal thresholds ----
     confidence_threshold: float = 0.65
