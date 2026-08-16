@@ -75,8 +75,14 @@ class KiteProvider:
             return
         for exch in ("NSE", "BSE"):
             rows = self._kite.instruments(exch)
+            # `instrument_type == "EQ"` alone isn't enough: Kite tags some
+            # index/benchmark listings (e.g. "NIFTY DIV OPPS 50") as EQ too,
+            # and unlike every real tradeable ticker their tradingsymbol is a
+            # human-readable name with spaces in it — not chartable, not
+            # quotable the normal way, and not something to ever suggest.
             self._instruments[exch] = {
-                r["tradingsymbol"]: r for r in rows if r.get("instrument_type") == "EQ"
+                r["tradingsymbol"]: r for r in rows
+                if r.get("instrument_type") == "EQ" and " " not in r.get("tradingsymbol", "")
             }
         self._instruments_loaded_at = self._now()
 

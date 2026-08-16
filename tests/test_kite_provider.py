@@ -146,6 +146,30 @@ class TestSearch:
         results = provider._search_sync("a", limit=1)  # matches RELIANCE and TCS's names
         assert len(results) == 1
 
+    def test_index_listings_tagged_eq_are_excluded_not_just_futures(self):
+        """Live bug: Kite tags some index/benchmark listings as instrument_type
+        "EQ" too — "NIFTY DIV OPPS 50" is not a real tradeable ticker, and
+        unlike every genuine equity its tradingsymbol IS a human-readable name
+        with spaces in it, so it can never actually be charted/quoted. This
+        exercises the real _ensure_instruments() filtering (not a pre-filtered
+        fixture), since that's where the bug actually lived."""
+        provider = _provider_with_token()
+        provider._kite.instruments = MagicMock(side_effect=[
+            [
+                {"tradingsymbol": "RELIANCE", "name": "RELIANCE INDUSTRIES",
+                 "instrument_token": 738561, "instrument_type": "EQ"},
+                {"tradingsymbol": "NIFTY DIV OPPS 50", "name": "NIFTY DIV OPPS 50",
+                 "instrument_token": 1, "instrument_type": "EQ"},
+            ],
+            [],
+        ])
+
+        results = provider._search_sync("nifty", limit=8)
+
+        assert results == []
+        assert "NIFTY DIV OPPS 50" not in provider._instruments["NSE"]
+        assert "RELIANCE" in provider._instruments["NSE"]
+
 
 @pytest.mark.asyncio
 async def test_async_methods_wrap_the_sync_ones():
