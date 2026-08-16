@@ -77,6 +77,15 @@ class TestGetQuote:
 
         assert provider._get_quote_sync("RELIANCE", "NSE") is None
 
+    def test_a_network_error_returns_none_not_a_raise(self):
+        """Network-layer errors (ConnectionError, TimeoutError, etc.) from the
+        underlying requests library are OSError subclasses and must degrade to
+        None rather than propagate."""
+        provider = _provider_with_token()
+        provider._kite.quote = MagicMock(side_effect=ConnectionError("network down"))
+
+        assert provider._get_quote_sync("RELIANCE", "NSE") is None
+
 
 class TestGetHistoricalDf:
     def test_resolves_symbol_to_instrument_token_and_shapes_the_frame(self):

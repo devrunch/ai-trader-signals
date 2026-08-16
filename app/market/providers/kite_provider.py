@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 # Same rationale as yfinance_provider.py's _VENDOR_ERRORS: these degrade to
 # None/[], the caller's "no data" path. Anything else is a bug in our own
 # code and is re-raised through logger.exception.
-_VENDOR_ERRORS = (KiteException, httpx.HTTPError, KeyError, ValueError, TypeError, IndexError)
+_VENDOR_ERRORS = (KiteException, httpx.HTTPError, OSError, KeyError, ValueError, TypeError, IndexError)
 
 _TOKEN_TTL_SECONDS = 300
 _INSTRUMENTS_TTL_SECONDS = 86400
