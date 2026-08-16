@@ -254,5 +254,5 @@ def refresh_zerodha_session():
         return {"ok": False, "error": str(e)}
 
     logger.info("Zerodha session refreshed and stored (%d NSE, %d BSE instruments)",
-                len(session.nse_instruments), len(session.bse_instruments))
+                len(session.nse_instruments or []), len(session.bse_instruments or []))
     return {"ok": True}
