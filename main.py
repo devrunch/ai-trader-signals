@@ -104,19 +104,29 @@ async def lifespan(app: FastAPI):
 
     kite_ticker: KiteTickerClient | None = None
 
-    # Zerodha's access token is minted daily in NestJS (see KiteProvider's own
-    # _ensure_token), not a static setting — fetch the current one the same way.
-    access_token = None
-    if settings.zerodha_api_key:
+    async def _attach_kite_ticker() -> bool:
+        """Best-effort — retried in the background so a slow/unreachable
+        NestJS never delays this process binding its port. Returns whether a
+        ticker got attached, so resubscribe knows whether there's a Kite leg
+        to resubscribe at all."""
+        nonlocal kite_ticker
+        if not settings.zerodha_api_key:
+            logger.warning("No Zerodha access token configured — Kite (NSE/BSE) live ticks disabled, poll path unaffected")
+            return False
+
+        # Zerodha's access token is minted daily in NestJS (see KiteProvider's
+        # own _ensure_token), not a static setting — fetch the current one the
+        # same way.
         resp = await _get_with_retry(
             f"{settings.api_service_url}/api/internal/broker/zerodha/session",
             {"x-internal-key": settings.internal_api_key},
             what="Zerodha session",
         )
-        if resp is not None:
-            access_token = resp.json().get("accessToken")
+        access_token = resp.json().get("accessToken") if resp is not None else None
+        if not access_token:
+            logger.warning("No Zerodha access token configured — Kite (NSE/BSE) live ticks disabled, poll path unaffected")
+            return False
 
-    if access_token:
         # Reuse market_data_router's own KiteProvider rather than standing up
         # a second one — a fresh instance would duplicate the instrument-list
         # download and never share its token cache with the router's.
@@ -133,7 +143,15 @@ async def lifespan(app: FastAPI):
         )
         kite_ticker.connect()
         live_ticks.set_kite_ticker(kite_ticker)
+        return True
 
+    async def _resubscribe_active_symbols(attach_task: asyncio.Task[bool]) -> None:
+        # Waits on the attach task rather than running independently — Kite
+        # must be attached to live_ticks first, or an NSE/BSE resubscribe
+        # hits LiveTicks.subscribe's fail-closed `self._kite is None` path
+        # and silently drops that symbol.
+        if not await attach_task:
+            return
         resp = await _get_with_retry(
             f"{settings.api_service_url}/api/internal/market/active-symbols",
             {"x-internal-key": settings.internal_api_key},
@@ -142,12 +160,24 @@ async def lifespan(app: FastAPI):
         if resp is not None:
             active = [(row["symbol"], row["exchange"]) for row in resp.json()]
             await live_ticks.resubscribe_from(active)
-    else:
-        logger.warning("No Zerodha access token configured — Kite (NSE/BSE) live ticks disabled, poll path unaffected")
+
+    # Both run as background tasks, not awaited here — the NestJS retry loops
+    # below can take up to ~85s each and must not delay this process binding
+    # its port / answering /health /ready (docker-compose's start_period for
+    # this service is far shorter than that worst case).
+    kite_attach_task = asyncio.create_task(_attach_kite_ticker())
+    resubscribe_task = asyncio.create_task(_resubscribe_active_symbols(kite_attach_task))
 
     try:
         yield
     finally:
+        kite_attach_task.cancel()
+        resubscribe_task.cancel()
+        for task in (kite_attach_task, resubscribe_task):
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         await live_ticks.close()
         if kite_ticker:
             kite_ticker.close()
