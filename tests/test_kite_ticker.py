@@ -81,3 +81,21 @@ def test_a_tick_for_an_unknown_token_is_dropped_not_raised():
                             "volume_traded": 0}])
 
     assert seen == []
+
+
+def test_subscribe_catches_an_sdk_exception_and_fails_closed():
+    client, provider, ws = _client()
+    ws.subscribe.side_effect = RuntimeError("handshake not done")
+
+    ok = client.subscribe("RELIANCE", "NSE")
+
+    assert ok is False
+    assert 738561 not in client._token_map
+
+
+def test_unsubscribe_catches_an_sdk_exception_without_raising():
+    client, provider, ws = _client()
+    client.subscribe("RELIANCE", "NSE")
+    ws.unsubscribe.side_effect = RuntimeError("socket closed")
+
+    client.unsubscribe("RELIANCE", "NSE")  # must not raise

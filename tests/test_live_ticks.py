@@ -30,8 +30,44 @@ def _live_ticks(get_quote=None):
 async def test_nse_bse_routes_to_the_kite_ticker():
     live, kite_ticker, redis_client, _ = _live_ticks()
 
-    await live.subscribe("RELIANCE", "NSE")
+    ok = await live.subscribe("RELIANCE", "NSE")
 
+    kite_ticker.subscribe.assert_called_once_with("RELIANCE", "NSE")
+    assert ok is True
+
+
+@pytest.mark.asyncio
+async def test_subscribing_an_nse_symbol_with_no_kite_ticker_fails_closed():
+    redis_client = AsyncMock()
+    quote_fn = AsyncMock(return_value={"symbol": "AAPL", "exchange": "NASDAQ", "ltp": 230.0})
+    live = LiveTicks(None, redis_client, quote_fn, poll_interval_seconds=0.01)
+
+    ok = await live.subscribe("RELIANCE", "NSE")
+
+    assert ok is False
+
+
+@pytest.mark.asyncio
+async def test_unsubscribing_an_nse_symbol_with_no_kite_ticker_does_not_raise():
+    redis_client = AsyncMock()
+    quote_fn = AsyncMock(return_value=None)
+    live = LiveTicks(None, redis_client, quote_fn, poll_interval_seconds=0.01)
+
+    await live.unsubscribe("RELIANCE", "NSE")  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_set_kite_ticker_attaches_it_after_construction():
+    redis_client = AsyncMock()
+    quote_fn = AsyncMock(return_value=None)
+    live = LiveTicks(None, redis_client, quote_fn, poll_interval_seconds=0.01)
+    kite_ticker = MagicMock()
+    kite_ticker.subscribe = MagicMock(return_value=True)
+
+    live.set_kite_ticker(kite_ticker)
+    ok = await live.subscribe("RELIANCE", "NSE")
+
+    assert ok is True
     kite_ticker.subscribe.assert_called_once_with("RELIANCE", "NSE")
 
 
@@ -109,3 +145,26 @@ async def test_close_cancels_every_running_poll_task():
     await live.close()
 
     assert live._poll_tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_poll_loop_survives_a_get_quote_exception_and_keeps_polling():
+    calls = {"n": 0}
+
+    async def flaky_get_quote(symbol, exchange):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient redis/provider failure")
+        return {"symbol": symbol, "exchange": exchange, "ltp": 1.0}
+
+    live, kite_ticker, redis_client, _ = _live_ticks(get_quote=flaky_get_quote)
+
+    await live.subscribe("AAPL", "NASDAQ")
+    await asyncio.sleep(0.05)
+
+    assert calls["n"] >= 2
+    assert ("AAPL", "NASDAQ") in live._poll_tasks
+    assert not live._poll_tasks[("AAPL", "NASDAQ")].done()
+    assert redis_client.publish.await_count >= 1
+
+    await live.unsubscribe("AAPL", "NASDAQ")
