@@ -62,7 +62,14 @@ class KiteTickerClient:
         return row["instrument_token"] if row else None
 
     def subscribe(self, symbol: str, exchange: str) -> bool:
-        token = self._resolve(symbol, exchange)
+        # _resolve() hits the KiteConnect SDK (_ensure_instruments), which can
+        # raise on its own — fail closed rather than let that escape unguarded,
+        # same as the SDK call below.
+        try:
+            token = self._resolve(symbol, exchange)
+        except Exception:
+            logger.exception("Kite ticker: instrument resolution failed for %s/%s", symbol, exchange)
+            return False
         if token is None:
             logger.warning("Kite ticker: no instrument token for %s/%s", symbol, exchange)
             return False
@@ -78,7 +85,11 @@ class KiteTickerClient:
         return True
 
     def unsubscribe(self, symbol: str, exchange: str) -> None:
-        token = self._resolve(symbol, exchange)
+        try:
+            token = self._resolve(symbol, exchange)
+        except Exception:
+            logger.exception("Kite ticker: instrument resolution failed for %s/%s", symbol, exchange)
+            return
         if token is None:
             return
         self._token_map.pop(token, None)

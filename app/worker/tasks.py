@@ -144,19 +144,6 @@ def run_screener():
     }
 
 
-@celery.task(name="app.worker.tasks.generate_single")
-def generate_single(symbol: str, exchange: str = "NSE"):
-    """On-demand signal generation for a single symbol — triggered by NestJS API."""
-    try:
-        result = run_async(service().generate(symbol.upper(), exchange.upper()))
-        if result.signal is None:
-            return {"symbol": symbol, "signal": None, "reason": result.reason}
-        return {"symbol": symbol, "signal": result.signal.__dict__, "reason": None}
-    except Exception as e:
-        logger.exception("generate_single failed for %s", symbol)
-        return {"symbol": symbol, "error": str(e)}
-
-
 @celery.task(name="app.worker.tasks.square_off_positions")
 def square_off_positions():
     """Close every open paper position at market — 15:20 IST, via Celery beat.

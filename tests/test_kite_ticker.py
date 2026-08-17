@@ -99,3 +99,26 @@ def test_unsubscribe_catches_an_sdk_exception_without_raising():
     ws.unsubscribe.side_effect = RuntimeError("socket closed")
 
     client.unsubscribe("RELIANCE", "NSE")  # must not raise
+
+
+def test_subscribe_fails_closed_when_resolution_itself_raises():
+    """_resolve() calls into the KiteConnect SDK (_ensure_instruments) before
+    subscribe()'s own try/except starts — an SDK hiccup there must degrade
+    the same as a subscribe-call failure, not propagate to the caller."""
+    client, provider, ws = _client()
+    provider._ensure_instruments.side_effect = RuntimeError("kite api down")
+
+    ok = client.subscribe("RELIANCE", "NSE")
+
+    assert ok is False
+    ws.subscribe.assert_not_called()
+
+
+def test_unsubscribe_is_a_no_op_when_resolution_itself_raises():
+    client, provider, ws = _client()
+    client.subscribe("RELIANCE", "NSE")
+    provider._ensure_instruments.side_effect = RuntimeError("kite api down")
+
+    client.unsubscribe("RELIANCE", "NSE")  # must not raise
+
+    ws.unsubscribe.assert_not_called()

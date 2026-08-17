@@ -60,10 +60,6 @@ def generate_bedrock_key(access_key: str, secret_key: str, region: str, expires:
     return f"bedrock-api-key-{encoded}"
 
 
-# Backwards-compatible alias — the private name was imported elsewhere.
-_generate_bedrock_key = generate_bedrock_key
-
-
 class Settings(BaseSettings):
     environment: str = "development"
 

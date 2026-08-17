@@ -25,10 +25,13 @@ a turn that nobody is watching costs one no-op call per event.
 """
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Protocol
+
+logger = logging.getLogger(__name__)
 
 
 class EventKind(str, Enum):
@@ -149,7 +152,7 @@ class TurnRecorder:
         except Exception:
             # A broken listener (a disconnected browser, most likely) must never
             # take down the turn it is watching.
-            pass
+            logger.warning("Event listener failed for %s", event.kind, exc_info=True)
         return event
 
     # -- convenience wrappers, so call sites read as intent -----------------

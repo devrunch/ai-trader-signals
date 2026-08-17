@@ -74,9 +74,13 @@ class ChatBody(BaseModel):
 async def chat(body: ChatBody, service: SignalService = Depends(get_service)):
     """Agentic analysis — the model calls tools (market data, indicators, levels,
     the user's portfolio, risk sizing, backtests, chart drawing) before answering."""
-    return await service.chat(
-        body.symbol.upper(), body.exchange.upper(), body.message, body.history, body.user_id
-    )
+    try:
+        return await service.chat(
+            body.symbol.upper(), body.exchange.upper(), body.message, body.history, body.user_id
+        )
+    except Exception as exc:  # noqa: BLE001 - reported to the client, then logged
+        logger.exception("Chat failed for %s", body.symbol)
+        raise HTTPException(status_code=502, detail="The analysis could not be completed") from exc
 
 
 @router.post("/chat/stream")

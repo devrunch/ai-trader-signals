@@ -140,6 +140,9 @@ class KiteProvider:
         except _VENDOR_ERRORS as e:
             logger.warning("Kite quote fetch failed for %s/%s: %s", symbol, exchange, e)
             return None
+        except Exception:
+            logger.exception("Unexpected error in Kite quote for %s/%s", symbol, exchange)
+            return None
 
     # ------------------------------------------------------------------
     # get_historical_df
@@ -177,6 +180,9 @@ class KiteProvider:
             return df[["open", "high", "low", "close", "volume"]]
         except _VENDOR_ERRORS as e:
             logger.warning("Kite historical fetch failed for %s/%s: %s", symbol, exchange, e)
+            return None
+        except Exception:
+            logger.exception("Unexpected error in Kite history for %s/%s", symbol, exchange)
             return None
 
     # ------------------------------------------------------------------
@@ -229,4 +235,7 @@ class KiteProvider:
             return [item for _, item in scored[:limit]]
         except _VENDOR_ERRORS as e:
             logger.warning("Kite search failed for %r: %s", query, e)
+            return []
+        except Exception:
+            logger.exception("Unexpected error searching Kite for %r", query)
             return []

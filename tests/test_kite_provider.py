@@ -86,6 +86,15 @@ class TestGetQuote:
 
         assert provider._get_quote_sync("RELIANCE", "NSE") is None
 
+    def test_an_unanticipated_sdk_exception_also_degrades_to_none(self):
+        """Anything outside _VENDOR_ERRORS used to propagate — same broad
+        fallback as YFinanceProvider so a genuinely unexpected SDK exception
+        degrades instead of turning into a raw 500."""
+        provider = _provider_with_token()
+        provider._kite.quote = MagicMock(side_effect=RuntimeError("something new"))
+
+        assert provider._get_quote_sync("RELIANCE", "NSE") is None
+
 
 class TestGetHistoricalDf:
     def test_resolves_symbol_to_instrument_token_and_shapes_the_frame(self):
@@ -115,6 +124,17 @@ class TestGetHistoricalDf:
         provider._instruments_loaded_at = provider._now()
 
         assert provider._get_historical_df_sync("NOTREAL", "NSE", "1d", 30) is None
+
+    def test_an_unanticipated_sdk_exception_also_degrades_to_none(self):
+        provider = _provider_with_token()
+        provider._instruments = {
+            "NSE": {r["tradingsymbol"]: r for r in NSE_INSTRUMENTS if r["instrument_type"] == "EQ"},
+            "BSE": {},
+        }
+        provider._instruments_loaded_at = provider._now()
+        provider._kite.historical_data = MagicMock(side_effect=RuntimeError("something new"))
+
+        assert provider._get_historical_df_sync("RELIANCE", "NSE", "1d", 30) is None
 
 
 class TestSearch:
@@ -231,6 +251,12 @@ class TestSearch:
         symbols = [r["symbol"] for r in results]
         assert "NIFTY 50" in symbols
         assert "NIFTY DIV OPPS 50" not in symbols
+
+    def test_an_unanticipated_sdk_exception_also_degrades_to_empty_list(self):
+        provider = _provider_with_token()
+        provider._kite.instruments = MagicMock(side_effect=RuntimeError("something new"))
+
+        assert provider._search_sync("reliance", limit=8) == []
 
 
 @pytest.mark.asyncio

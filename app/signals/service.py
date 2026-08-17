@@ -32,7 +32,7 @@ from app.market.providers.registry import market_data_router
 from app.signals import analysis, prompts, validation
 from app.signals import indicators as ind_mod
 from app.signals import sentiment as sentiment_mod
-from app.signals.publisher import NullPublisher, SqsSignalPublisher
+from app.signals.publisher import SignalPublisher, SqsSignalPublisher
 from app.signals.types import GeneratedSignal, SignalType
 
 logger = logging.getLogger(__name__)
@@ -59,7 +59,8 @@ class SignalResult(NamedTuple):
 
 
 class SignalService:
-    def __init__(self, llm: LlmClient | None = None, publisher=None, market=market_data_router, settings=None):
+    def __init__(self, llm: LlmClient | None = None, publisher: SignalPublisher | None = None,
+                 market=market_data_router, settings=None):
         self.settings = settings or get_settings()
         self.llm = llm or get_llm()
         self.publisher = publisher if publisher is not None else SqsSignalPublisher(self.settings)
@@ -364,8 +365,3 @@ def _candles(frame: pd.DataFrame) -> list[dict]:
          "low": round(float(r.low), 2), "close": round(float(r.close), 2), "volume": round(float(r.volume), 0)}
         for idx, r in frame.iterrows()
     ]
-
-
-def backtest_publisher() -> NullPublisher:
-    """A publisher that discards — for the brief and the backtest."""
-    return NullPublisher()
