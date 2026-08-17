@@ -150,7 +150,12 @@ async def lifespan(app: FastAPI):
         # Kite is attached before any NSE/BSE resubscribe. Non-Kite symbols
         # must still resubscribe even if Kite attach failed; LiveTicks.subscribe
         # already fails closed per-symbol for Kite exchanges when unattached.
-        await attach_task
+        # An unexpected exception (not just attach's own False return) must
+        # not skip the resubscribe below either.
+        try:
+            await attach_task
+        except Exception as e:
+            logger.error("Kite attach task failed: %s", e)
         resp = await _get_with_retry(
             f"{settings.api_service_url}/api/internal/market/active-symbols",
             {"x-internal-key": settings.internal_api_key},
@@ -177,6 +182,8 @@ async def lifespan(app: FastAPI):
                 await task
             except asyncio.CancelledError:
                 pass
+            except Exception as e:
+                logger.error("Background startup task failed during shutdown: %s", e)
         await live_ticks.close()
         if kite_ticker:
             kite_ticker.close()
