@@ -26,15 +26,17 @@ class _SymbolExchange(BaseModel):
 async def subscribe_live_ticks(body: _SymbolExchange):
     """Called by NestJS on a symbol room's first watcher. No auth guard —
     signals-1 is never internet-facing, same as every route above."""
-    assert live_ticks is not None, "live_ticks not initialized"
-    await live_ticks.subscribe(body.symbol, body.exchange)
-    return {"ok": True}
+    if live_ticks is None:
+        raise HTTPException(status_code=503, detail="live ticks not ready yet")
+    ok = await live_ticks.subscribe(body.symbol, body.exchange)
+    return {"ok": ok}
 
 
 @router.post("/internal/live-ticks/unsubscribe")
 async def unsubscribe_live_ticks(body: _SymbolExchange):
     """Called by NestJS on a symbol room's last watcher leaving."""
-    assert live_ticks is not None, "live_ticks not initialized"
+    if live_ticks is None:
+        raise HTTPException(status_code=503, detail="live ticks not ready yet")
     await live_ticks.unsubscribe(body.symbol, body.exchange)
     return {"ok": True}
 

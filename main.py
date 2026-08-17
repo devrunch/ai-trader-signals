@@ -26,7 +26,6 @@ from app.config import get_settings
 from app.market import router as market_router_module
 from app.market.kite_ticker import KiteTickerClient
 from app.market.live_ticks import LiveTicks
-from app.market.providers.kite_provider import KiteProvider
 from app.market.providers.registry import market_data_router
 from app.market.router import router as market_router
 from app.market.service import get_quote
@@ -48,48 +47,83 @@ READY_CACHE_SECONDS = 5.0
 # The probes themselves must never be the thing that hangs the check.
 PROBE_TIMEOUT_SECONDS = 5.0
 
+# docker-compose has `api` wait on `signals` being healthy, not the reverse —
+# so when this service's lifespan hook fires, `api` may not be listening yet.
+# 6 tries, 5s apart covers a normal `docker compose up` without stalling
+# startup indefinitely.
+_STARTUP_FETCH_ATTEMPTS = 6
+_STARTUP_FETCH_RETRY_SECONDS = 5.0
+
 _ready_cache: dict | None = None
 _ready_cached_at: float = 0.0
 _ready_lock = asyncio.Lock()
 
 
+async def _get_with_retry(url: str, headers: dict[str, str], *, what: str) -> httpx.Response | None:
+    """One-shot startup fetch, retried up to _STARTUP_FETCH_ATTEMPTS times.
+    Returns None (logging an error) once attempts are exhausted, rather than
+    raising — a slow-to-start `api` container must not abort this service's
+    own startup."""
+    for attempt in range(1, _STARTUP_FETCH_ATTEMPTS + 1):
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(url, headers=headers, timeout=10)
+            resp.raise_for_status()
+            return resp
+        except httpx.HTTPError as e:
+            if attempt < _STARTUP_FETCH_ATTEMPTS:
+                logger.warning(
+                    "%s fetch failed (attempt %d/%d): %s", what, attempt, _STARTUP_FETCH_ATTEMPTS, e
+                )
+                await asyncio.sleep(_STARTUP_FETCH_RETRY_SECONDS)
+            else:
+                logger.error("%s fetch failed after %d attempts: %s", what, _STARTUP_FETCH_ATTEMPTS, e)
+    return None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Captured now, on the main thread, before KiteTickerClient.connect() can
+    # start the Kite SDK's own reactor thread — on_tick below runs on that
+    # thread and needs this loop, not whatever thread it happens to fire on.
+    loop = asyncio.get_running_loop()
+
     executor = ThreadPoolExecutor(
         max_workers=EXECUTOR_MAX_WORKERS, thread_name_prefix="signals-io"
     )
-    asyncio.get_running_loop().set_default_executor(executor)
+    loop.set_default_executor(executor)
     logger.info("Default executor bounded to %d threads", EXECUTOR_MAX_WORKERS)
 
     settings = get_settings()
     redis_client = redis.from_url(settings.redis_url)
 
+    # Constructed unconditionally — the yfinance poll path (NASDAQ/NYSE/...)
+    # needs no Kite token at all, so it must not be gated behind one.
+    live_ticks = LiveTicks(None, redis_client, get_quote)
+    market_router_module.live_ticks = live_ticks
+
+    kite_ticker: KiteTickerClient | None = None
+
     # Zerodha's access token is minted daily in NestJS (see KiteProvider's own
     # _ensure_token), not a static setting — fetch the current one the same way.
     access_token = None
     if settings.zerodha_api_key:
-        try:
-            resp = await httpx.AsyncClient().get(
-                f"{settings.api_service_url}/api/internal/broker/zerodha/session",
-                headers={"x-internal-key": settings.internal_api_key},
-                timeout=10,
-            )
-            resp.raise_for_status()
+        resp = await _get_with_retry(
+            f"{settings.api_service_url}/api/internal/broker/zerodha/session",
+            {"x-internal-key": settings.internal_api_key},
+            what="Zerodha session",
+        )
+        if resp is not None:
             access_token = resp.json().get("accessToken")
-        except httpx.HTTPError as e:
-            logger.error("Could not fetch Zerodha session on startup: %s", e)
 
-    live_ticks: LiveTicks | None = None
-    kite_ticker: KiteTickerClient | None = None
     if access_token:
-        kite_provider = KiteProvider(settings)
-        # KiteTickerClient and LiveTicks each need the other to exist first —
-        # live_ticks_ref is a forward-reference cell the callback closes over,
-        # filled in right after LiveTicks is actually constructed below.
-        live_ticks_ref: list[LiveTicks] = []
+        # Reuse market_data_router's own KiteProvider rather than standing up
+        # a second one — a fresh instance would duplicate the instrument-list
+        # download and never share its token cache with the router's.
+        kite_provider = market_data_router.providers.get("NSE")
 
         def on_tick(payload: dict) -> None:
-            asyncio.create_task(live_ticks_ref[0].publish(payload))
+            asyncio.run_coroutine_threadsafe(live_ticks.publish(payload), loop)
 
         kite_ticker = KiteTickerClient(
             api_key=settings.zerodha_api_key,
@@ -98,29 +132,23 @@ async def lifespan(app: FastAPI):
             on_tick=on_tick,
         )
         kite_ticker.connect()
-        live_ticks = LiveTicks(kite_ticker, redis_client, get_quote)
-        live_ticks_ref.append(live_ticks)
-        market_router_module.live_ticks = live_ticks
+        live_ticks.set_kite_ticker(kite_ticker)
 
-        try:
-            resp = await httpx.AsyncClient().get(
-                f"{settings.api_service_url}/api/internal/market/active-symbols",
-                headers={"x-internal-key": settings.internal_api_key},
-                timeout=10,
-            )
-            resp.raise_for_status()
+        resp = await _get_with_retry(
+            f"{settings.api_service_url}/api/internal/market/active-symbols",
+            {"x-internal-key": settings.internal_api_key},
+            what="Active symbols",
+        )
+        if resp is not None:
             active = [(row["symbol"], row["exchange"]) for row in resp.json()]
             await live_ticks.resubscribe_from(active)
-        except httpx.HTTPError as e:
-            logger.error("Could not fetch active symbols on startup: %s", e)
     else:
-        logger.warning("No Zerodha access token configured — live ticks disabled")
+        logger.warning("No Zerodha access token configured — Kite (NSE/BSE) live ticks disabled, poll path unaffected")
 
     try:
         yield
     finally:
-        if live_ticks:
-            await live_ticks.close()
+        await live_ticks.close()
         if kite_ticker:
             kite_ticker.close()
         await redis_client.aclose()

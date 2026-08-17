@@ -66,8 +66,15 @@ class KiteTickerClient:
         if token is None:
             logger.warning("Kite ticker: no instrument token for %s/%s", symbol, exchange)
             return False
+        # connect() returns before the WebSocket handshake finishes, so an
+        # early subscribe() (e.g. resubscribe_from at startup) can race it —
+        # fail closed rather than let the SDK exception abort the caller.
+        try:
+            self._ticker.subscribe([token])
+        except Exception:
+            logger.exception("Kite ticker: subscribe failed for %s/%s", symbol, exchange)
+            return False
         self._token_map[token] = (symbol.upper(), exchange.upper())
-        self._ticker.subscribe([token])
         return True
 
     def unsubscribe(self, symbol: str, exchange: str) -> None:
@@ -75,7 +82,10 @@ class KiteTickerClient:
         if token is None:
             return
         self._token_map.pop(token, None)
-        self._ticker.unsubscribe([token])
+        try:
+            self._ticker.unsubscribe([token])
+        except Exception:
+            logger.exception("Kite ticker: unsubscribe failed for %s/%s", symbol, exchange)
 
     def _on_ticks(self, ws, ticks: list[dict[str, Any]]) -> None:
         for tick in ticks:
