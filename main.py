@@ -106,9 +106,9 @@ async def lifespan(app: FastAPI):
 
     async def _attach_kite_ticker() -> bool:
         """Best-effort — retried in the background so a slow/unreachable
-        NestJS never delays this process binding its port. Returns whether a
-        ticker got attached, so resubscribe knows whether there's a Kite leg
-        to resubscribe at all."""
+        NestJS never delays this process binding its port. The bool return is
+        no longer branched on by any caller — resubscribe just waits on this
+        task for ordering, not for its result."""
         nonlocal kite_ticker
         if not settings.zerodha_api_key:
             logger.warning("No Zerodha access token configured — Kite (NSE/BSE) live ticks disabled, poll path unaffected")
@@ -146,12 +146,11 @@ async def lifespan(app: FastAPI):
         return True
 
     async def _resubscribe_active_symbols(attach_task: asyncio.Task[bool]) -> None:
-        # Waits on the attach task rather than running independently — Kite
-        # must be attached to live_ticks first, or an NSE/BSE resubscribe
-        # hits LiveTicks.subscribe's fail-closed `self._kite is None` path
-        # and silently drops that symbol.
-        if not await attach_task:
-            return
+        # Waits (but doesn't branch) on the attach task — ordering only, so
+        # Kite is attached before any NSE/BSE resubscribe. Non-Kite symbols
+        # must still resubscribe even if Kite attach failed; LiveTicks.subscribe
+        # already fails closed per-symbol for Kite exchanges when unattached.
+        await attach_task
         resp = await _get_with_retry(
             f"{settings.api_service_url}/api/internal/market/active-symbols",
             {"x-internal-key": settings.internal_api_key},
