@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     # and the chat agent's per-user trading context
     api_service_url: str = "http://localhost:8000"
     internal_api_key: str = ""       # shared secret for service-to-service calls
+    redis_url: str = "redis://redis:6379/0"
 
     # AWS
     aws_region: str = "ap-south-1"

@@ -2,14 +2,41 @@ import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
 
 from app.market import calendar as market_calendar
+from app.market.live_ticks import LiveTicks
 from app.market.news import get_market_news_result
 from app.market.service import get_batch_quotes, get_historical, get_quote, search_symbols
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Assigned by main.py's lifespan hook at startup.
+live_ticks: LiveTicks | None = None
+
+
+class _SymbolExchange(BaseModel):
+    symbol: str
+    exchange: str
+
+
+@router.post("/internal/live-ticks/subscribe")
+async def subscribe_live_ticks(body: _SymbolExchange):
+    """Called by NestJS on a symbol room's first watcher. No auth guard —
+    signals-1 is never internet-facing, same as every route above."""
+    assert live_ticks is not None, "live_ticks not initialized"
+    await live_ticks.subscribe(body.symbol, body.exchange)
+    return {"ok": True}
+
+
+@router.post("/internal/live-ticks/unsubscribe")
+async def unsubscribe_live_ticks(body: _SymbolExchange):
+    """Called by NestJS on a symbol room's last watcher leaving."""
+    assert live_ticks is not None, "live_ticks not initialized"
+    await live_ticks.unsubscribe(body.symbol, body.exchange)
+    return {"ok": True}
 
 
 @router.get("/quote/{symbol}")

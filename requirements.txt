@@ -12,5 +12,6 @@ pandas-ta==0.4.71b0
 yfinance>=0.2.43
 kiteconnect>=5.0.1
 pyotp>=2.9.0
+redis>=5.0.0
 pytz>=2024.1
 cachetools>=5.5.0

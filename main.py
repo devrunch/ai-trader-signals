@@ -18,11 +18,18 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
+import httpx
+import redis.asyncio as redis
 from fastapi import FastAPI, Response
 
 from app.config import get_settings
+from app.market import router as market_router_module
+from app.market.kite_ticker import KiteTickerClient
+from app.market.live_ticks import LiveTicks
+from app.market.providers.kite_provider import KiteProvider
 from app.market.providers.registry import market_data_router
 from app.market.router import router as market_router
+from app.market.service import get_quote
 from app.signals.router import router as signals_router
 
 logger = logging.getLogger(__name__)
@@ -53,9 +60,70 @@ async def lifespan(app: FastAPI):
     )
     asyncio.get_running_loop().set_default_executor(executor)
     logger.info("Default executor bounded to %d threads", EXECUTOR_MAX_WORKERS)
+
+    settings = get_settings()
+    redis_client = redis.from_url(settings.redis_url)
+
+    # Zerodha's access token is minted daily in NestJS (see KiteProvider's own
+    # _ensure_token), not a static setting — fetch the current one the same way.
+    access_token = None
+    if settings.zerodha_api_key:
+        try:
+            resp = await httpx.AsyncClient().get(
+                f"{settings.api_service_url}/api/internal/broker/zerodha/session",
+                headers={"x-internal-key": settings.internal_api_key},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            access_token = resp.json().get("accessToken")
+        except httpx.HTTPError as e:
+            logger.error("Could not fetch Zerodha session on startup: %s", e)
+
+    live_ticks: LiveTicks | None = None
+    kite_ticker: KiteTickerClient | None = None
+    if access_token:
+        kite_provider = KiteProvider(settings)
+        # KiteTickerClient and LiveTicks each need the other to exist first —
+        # live_ticks_ref is a forward-reference cell the callback closes over,
+        # filled in right after LiveTicks is actually constructed below.
+        live_ticks_ref: list[LiveTicks] = []
+
+        def on_tick(payload: dict) -> None:
+            asyncio.create_task(live_ticks_ref[0].publish(payload))
+
+        kite_ticker = KiteTickerClient(
+            api_key=settings.zerodha_api_key,
+            access_token=access_token,
+            kite_provider=kite_provider,
+            on_tick=on_tick,
+        )
+        kite_ticker.connect()
+        live_ticks = LiveTicks(kite_ticker, redis_client, get_quote)
+        live_ticks_ref.append(live_ticks)
+        market_router_module.live_ticks = live_ticks
+
+        try:
+            resp = await httpx.AsyncClient().get(
+                f"{settings.api_service_url}/api/internal/market/active-symbols",
+                headers={"x-internal-key": settings.internal_api_key},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            active = [(row["symbol"], row["exchange"]) for row in resp.json()]
+            await live_ticks.resubscribe_from(active)
+        except httpx.HTTPError as e:
+            logger.error("Could not fetch active symbols on startup: %s", e)
+    else:
+        logger.warning("No Zerodha access token configured — live ticks disabled")
+
     try:
         yield
     finally:
+        if live_ticks:
+            await live_ticks.close()
+        if kite_ticker:
+            kite_ticker.close()
+        await redis_client.aclose()
         executor.shutdown(wait=False, cancel_futures=True)
 
 
