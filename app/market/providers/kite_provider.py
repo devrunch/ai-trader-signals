@@ -98,9 +98,13 @@ class KiteProvider:
             # and unlike every real tradeable ticker their tradingsymbol is a
             # human-readable name with spaces in it — not chartable, not
             # quotable the normal way, and not something to ever suggest.
+            # Real indices (NIFTY 50, SENSEX, ...) also have a space in their
+            # tradingsymbol but carry segment "INDICES", which the junk EQ
+            # rows don't — so they're let through on that check instead.
             self._instruments[exch] = {
                 r["tradingsymbol"]: r for r in rows
-                if r.get("instrument_type") == "EQ" and " " not in r.get("tradingsymbol", "")
+                if (r.get("instrument_type") == "EQ" and " " not in r.get("tradingsymbol", ""))
+                or r.get("segment") == "INDICES"
             }
         self._instruments_loaded_at = self._now()
 

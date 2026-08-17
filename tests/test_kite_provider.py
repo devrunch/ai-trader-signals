@@ -211,6 +211,27 @@ class TestSearch:
         assert "NIFTY DIV OPPS 50" not in provider._instruments["NSE"]
         assert "RELIANCE" in provider._instruments["NSE"]
 
+    def test_real_indices_are_kept_despite_the_space_in_their_symbol(self):
+        """NIFTY 50 itself has a space in its tradingsymbol too, same as the
+        junk listings above — but it carries segment "INDICES", which junk
+        EQ rows don't, so it must survive the filter that excludes them."""
+        provider = _provider_with_token()
+        provider._kite.instruments = MagicMock(side_effect=[
+            [
+                {"tradingsymbol": "NIFTY 50", "name": "NIFTY 50",
+                 "instrument_token": 256265, "instrument_type": "EQ", "segment": "INDICES"},
+                {"tradingsymbol": "NIFTY DIV OPPS 50", "name": "NIFTY DIV OPPS 50",
+                 "instrument_token": 1, "instrument_type": "EQ"},
+            ],
+            [],
+        ])
+
+        results = provider._search_sync("nifty", limit=8)
+
+        symbols = [r["symbol"] for r in results]
+        assert "NIFTY 50" in symbols
+        assert "NIFTY DIV OPPS 50" not in symbols
+
 
 @pytest.mark.asyncio
 async def test_async_methods_wrap_the_sync_ones():
