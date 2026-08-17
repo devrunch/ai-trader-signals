@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from datetime import datetime, timedelta
 from functools import partial
@@ -41,6 +42,23 @@ _INSTRUMENTS_TTL_SECONDS = 86400
 _INTERVAL_MAP = {
     "1m": "minute", "5m": "5minute", "15m": "15minute", "1h": "60minute", "1d": "day",
 }
+
+
+def _matches(haystack: str, needle: str, *, prefix_only: bool = False) -> bool:
+    """Prefix or substring match, refusing one that runs into another
+    digit right after — "50" matching inside "500" is a different number,
+    not a shorter version of the same one."""
+    if not needle:
+        return False
+    positions = [0] if prefix_only else range(len(haystack) - len(needle) + 1)
+    ends_in_digit = needle[-1].isdigit()
+    for start in positions:
+        if haystack[start:start + len(needle)] != needle:
+            continue
+        end = start + len(needle)
+        if not ends_in_digit or end >= len(haystack) or not haystack[end].isdigit():
+            return True
+    return False
 
 
 class KiteProvider:
@@ -165,20 +183,46 @@ class KiteProvider:
         return await loop.run_in_executor(None, self._search_sync, query, limit)
 
     def _search_sync(self, query: str, limit: int) -> list[dict]:
+        """Ranked best-first: exact symbol, symbol prefix, name prefix,
+        then substring on symbol/name. Every check goes through
+        `_matches`, which refuses a match that runs into more digits right
+        after it — otherwise "nifty50" prefix-matches "nifty500...", a
+        different number wearing the query as its first few characters."""
         try:
             self._ensure_instruments()
             q = query.strip().lower()
             if not q:
                 return []
-            results = []
+            q_compact = q.replace(" ", "")
+            # "nifty50" -> "nifty 50", so a name spelled with the space still matches.
+            q_spaced = re.sub(r"([a-z])(\d)", r"\1 \2", q)
+
+            scored: list[tuple[int, dict]] = []
             for exch in ("NSE", "BSE"):
                 for symbol, row in self._instruments.get(exch, {}).items():
                     name = row.get("name") or symbol
-                    if q in symbol.lower() or q in name.lower():
-                        results.append({"symbol": symbol, "name": name, "exchange": exch})
-                        if len(results) >= limit:
-                            return results
-            return results
+                    symbol_l = symbol.lower()
+                    name_l = name.lower()
+                    name_compact = name_l.replace(" ", "")
+
+                    if symbol_l == q:
+                        score = 0
+                    elif _matches(symbol_l, q, prefix_only=True):
+                        score = 1
+                    elif _matches(name_l, q, prefix_only=True) or _matches(name_l, q_spaced, prefix_only=True):
+                        score = 2
+                    elif _matches(name_compact, q_compact, prefix_only=True):
+                        score = 3
+                    elif _matches(symbol_l, q):
+                        score = 4
+                    elif _matches(name_l, q) or _matches(name_l, q_spaced) or _matches(name_compact, q_compact):
+                        score = 5
+                    else:
+                        continue
+                    scored.append((score, {"symbol": symbol, "name": name, "exchange": exch}))
+
+            scored.sort(key=lambda pair: pair[0])
+            return [item for _, item in scored[:limit]]
         except _VENDOR_ERRORS as e:
             logger.warning("Kite search failed for %r: %s", query, e)
             return []

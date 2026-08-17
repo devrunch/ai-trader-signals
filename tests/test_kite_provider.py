@@ -146,6 +146,47 @@ class TestSearch:
         results = provider._search_sync("a", limit=1)  # matches RELIANCE and TCS's names
         assert len(results) == 1
 
+    def test_relevant_matches_rank_ahead_of_accidental_substring_hits(self):
+        """"nifty50" must not rank an unrelated ETF (whose name merely
+        starts with the substring "nifty50") ahead of the real tracker,
+        whose name has a space where the query has none."""
+        provider = _provider_with_token()
+        provider._instruments = {
+            "NSE": {
+                "NIFTYBEES": {"tradingsymbol": "NIFTYBEES",
+                               "name": "NIPPON INDIA ETF NIFTY 50 BEES"},
+                "NIFTY500MOM50": {"tradingsymbol": "NIFTY500MOM50",
+                                    "name": "NIFTY500 MOMENTUM 50 ETF"},
+            },
+            "BSE": {},
+        }
+        provider._instruments_loaded_at = provider._now()
+
+        results = provider._search_sync("nifty50", limit=8)
+
+        symbols = [r["symbol"] for r in results]
+        assert "NIFTYBEES" in symbols
+        # The collision candidate is either absent (its only "match" runs
+        # into more digits right after) or, if present, ranks strictly
+        # behind the real tracker — never ahead of it.
+        if "NIFTY500MOM50" in symbols:
+            assert symbols.index("NIFTYBEES") < symbols.index("NIFTY500MOM50")
+
+    def test_an_exact_symbol_match_ranks_first(self):
+        provider = _provider_with_token()
+        provider._instruments = {
+            "NSE": {
+                "TCS": {"tradingsymbol": "TCS", "name": "TATA CONSULTANCY SERVICES"},
+                "TCSADV": {"tradingsymbol": "TCSADV", "name": "SOME TCS-ADJACENT THING"},
+            },
+            "BSE": {},
+        }
+        provider._instruments_loaded_at = provider._now()
+
+        results = provider._search_sync("tcs", limit=8)
+
+        assert results[0]["symbol"] == "TCS"
+
     def test_index_listings_tagged_eq_are_excluded_not_just_futures(self):
         """Live bug: Kite tags some index/benchmark listings as instrument_type
         "EQ" too — "NIFTY DIV OPPS 50" is not a real tradeable ticker, and
