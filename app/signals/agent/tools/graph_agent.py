@@ -133,13 +133,25 @@ async def _validate_via_node(source: str, output_name: str) -> dict:
         stdout, stderr = await asyncio.wait_for(
             proc.communicate(source.encode()), timeout=VALIDATE_TIMEOUT_SECONDS,
         )
-    except (asyncio.TimeoutError, OSError) as e:
+    except Exception as e:
         # wait_for only cancels the await — the OS process is still running
-        # and nothing else is tracking it, so it has to be reaped here. A
-        # broken pipe (OSError) leaves the same orphan risk as a timeout, so
-        # it gets the same kill+reap treatment.
-        proc.kill()
-        await proc.wait()
+        # and nothing else is tracking it, so it has to be reaped here.
+        # Deliberately broad: a subprocess pipe is an OS/event-loop boundary,
+        # and different loop implementations signal the same underlying
+        # failure with different exception types — a broken pipe is OSError
+        # under plain asyncio, but uvloop (the production event loop; this
+        # was found live via a real "Gaussian filter" request) raises a bare
+        # RuntimeError ("unable to perform operation on <WriteUnixTransport
+        # closed=True...>; the handler is closed") when the child dies before
+        # communicate() finishes writing its stdin. Narrowing this to named
+        # exception types is exactly what let that RuntimeError escape
+        # uncaught last time — the contract here is "never let a subprocess
+        # problem crash the tool call," not "catch every type we've seen so far."
+        try:
+            proc.kill()
+            await proc.wait()
+        except ProcessLookupError:
+            pass  # already gone -- the crash that got us here often means it already exited
         logger.warning("diascript-validate did not complete: %s", e)
         return {"valid": False, "error": {"message": "validator unavailable"}}
 

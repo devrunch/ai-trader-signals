@@ -232,6 +232,79 @@ async def test_a_broken_pipe_is_killed_and_reaped_like_a_timeout():
     assert calls["waited"] == 1
 
 
+@pytest.mark.asyncio
+async def test_uvloops_bare_runtimeerror_is_caught_like_a_broken_pipe():
+    """Found live in production via a real user request ("Gaussian filter
+    trend indicator"): uvloop (the real production event loop, not plain
+    asyncio) signals "child died before communicate() finished writing
+    stdin" as a bare RuntimeError ("unable to perform operation on
+    <WriteUnixTransport closed=True...>; the handler is closed"), not an
+    OSError. The narrower (TimeoutError, OSError) except clause let this
+    escape uncaught and crash the whole tool call."""
+    from app.signals.agent.tools import graph_agent
+
+    calls = {"kill": 0, "waited": 0}
+
+    class _DeadTransportProc:
+        returncode = None
+
+        async def communicate(self, data):
+            raise RuntimeError(
+                "unable to perform operation on <WriteUnixTransport closed=True reading=False "
+                "0xfbd6feb83e00>; the handler is closed"
+            )
+
+        def kill(self):
+            calls["kill"] += 1
+
+        async def wait(self):
+            calls["waited"] += 1
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return _DeadTransportProc()
+
+    with patch.object(graph_agent.asyncio, "create_subprocess_exec", fake_create_subprocess_exec):
+        result = await graph_agent._validate_via_node("result = line(close)", "result")
+
+    assert result == {"valid": False, "error": {"message": "validator unavailable"}}
+    assert calls["kill"] == 1
+    assert calls["waited"] == 1
+
+
+@pytest.mark.asyncio
+async def test_killing_an_already_dead_process_does_not_raise():
+    """The crash that gets us into the except block often means the child
+    already exited -- proc.kill() on an already-gone PID raises
+    ProcessLookupError, which must not escape and mask the real error."""
+    from app.signals.agent.tools import graph_agent
+
+    calls = {"waited": 0}
+
+    class _AlreadyGoneProc:
+        returncode = None
+
+        async def communicate(self, data):
+            raise RuntimeError("transport already closed")
+
+        def kill(self):
+            raise ProcessLookupError("no such process")
+
+        async def wait(self):
+            calls["waited"] += 1
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return _AlreadyGoneProc()
+
+    with patch.object(graph_agent.asyncio, "create_subprocess_exec", fake_create_subprocess_exec):
+        result = await graph_agent._validate_via_node("result = line(close)", "result")
+
+    # kill() raising means the process is already gone -- nothing left to
+    # reap, so wait() correctly never runs. The thing under test is that
+    # ProcessLookupError itself doesn't escape and mask the real error.
+    assert result == {"valid": False, "error": {"message": "validator unavailable"}}
+    assert calls["waited"] == 0
+
+
 # ---------------------------------------------------------------------------
 # Fix 3: outputType is enforced, not just parsed.
 # ---------------------------------------------------------------------------
