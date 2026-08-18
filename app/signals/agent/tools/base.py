@@ -42,6 +42,8 @@ class ToolContext:
         account=None,
         market=None,
         settings=None,
+        llm=None,
+        budget=None,
     ):
         self.symbol = symbol.upper()
         self.exchange = exchange.upper()
@@ -50,6 +52,8 @@ class ToolContext:
         self.settings = settings
         self.account = account          # TradingContextClient — the user's book
         self.market = market            # provider router
+        self.llm = llm                  # the turn's real LlmClient — for tools that write text/formulas themselves
+        self.budget = budget            # the turn's Budget — record() any ctx.llm call into it, same as orchestrator.py does
 
         # Written by tools, read by the orchestrator when the turn ends.
         self.drawings: list[dict] = []

@@ -24,6 +24,7 @@ import pandas as pd
 
 from app.config import get_settings
 from app.market.providers.registry import market_data_router
+from app.signals.agent.budget import Budget
 from app.signals.agent.context import TradingContextClient
 from app.signals.agent.events import TurnRecorder
 from app.signals.agent.runner import ToolRunner
@@ -48,6 +49,8 @@ class AgentToolbox:
         market=market_data_router,
         settings=None,
         recorder: TurnRecorder | None = None,
+        llm=None,
+        budget: Budget | None = None,
     ):
         settings = settings or get_settings()
         self.ctx = ToolContext(
@@ -58,6 +61,12 @@ class AgentToolbox:
             account=context or TradingContextClient(user_id, settings),
             market=market,
             settings=settings,
+            llm=llm,
+            # The orchestrator passes the turn's own Budget so a tool's LLM
+            # spend lands in the same total as triage/loop/wrap-up. Built fresh
+            # here only for callers (mostly tests) that construct a toolbox
+            # standalone, so ctx.budget is never None for a tool that needs it.
+            budget=budget or Budget.from_settings(settings),
         )
         self.runner = ToolRunner(
             self.ctx, recorder,

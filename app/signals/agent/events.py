@@ -102,6 +102,7 @@ _TOOL_LABELS: dict[str, str] = {
     "simulate_trade": "Working through the trade maths",
     "draw_on_chart": "Drawing on the chart",
     "plot_series": "Plotting on the chart",
+    "generate_custom_indicator": "Writing custom indicator",
 }
 
 

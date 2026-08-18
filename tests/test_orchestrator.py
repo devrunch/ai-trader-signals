@@ -259,6 +259,37 @@ async def test_an_empty_indicator_change_is_not_reported(trending_frame):
 
 
 @pytest.mark.asyncio
+async def test_a_custom_indicator_is_recorded_as_a_chart_change(trending_frame):
+    """Same gap as chart_indicators, same fix: writing a custom indicator
+    changes the user's chart just as much as toggling a built-in one on, but it
+    lands in `results["custom_indicators"]`, not `drawings` — so without this
+    branch it left no trace either."""
+    llm = FakeLlm(_response(content="Added a custom band."))
+    box = FakeBox(results={"custom_indicators": [
+        {"name": "DIA_CUSTOM_ab12cd34", "source": "result = line(ema(close, 20))",
+         "outputName": "result", "displayLabel": "EMA 20"},
+    ]})
+    seen = []
+
+    await _run(llm, trending_frame, box, recorder=TurnRecorder(seen.append))
+
+    marks = [e for e in seen if e.kind == EventKind.DRAWING]
+    assert marks and "EMA 20" in marks[0].label
+    assert marks[0].detail["names"] == ["DIA_CUSTOM_ab12cd34"]
+    assert marks[0].detail["labels"] == ["EMA 20"]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_custom_indicator_list_is_not_reported(trending_frame):
+    llm = FakeLlm(_response(content="Nothing custom."))
+    box = FakeBox(results={"custom_indicators": []})
+    seen = []
+
+    await _run(llm, trending_frame, box, recorder=TurnRecorder(seen.append))
+    assert not [e for e in seen if e.kind == EventKind.DRAWING]
+
+
+@pytest.mark.asyncio
 async def test_a_broken_strategy_result_is_not_reported_as_a_run(trending_frame):
     llm = FakeLlm(_response(content="Could not backtest."))
     box = FakeBox(results={"strategy": {"error": "not enough history"}})

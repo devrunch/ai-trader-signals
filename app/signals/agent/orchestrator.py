@@ -60,7 +60,7 @@ async def run_chat(
     recorder: TurnRecorder | None = None,
     store: TurnStore | None = None,
 ) -> dict:
-    state = prepare(symbol, exchange, message, df, history, user_id, toolbox, settings, recorder)
+    state = prepare(llm, symbol, exchange, message, df, history, user_id, toolbox, settings, recorder)
     try:
         # The front desk first. It holds no tool schemas, so a greeting costs a
         # few hundred tokens instead of the ~2,400 of schemas that the analyst
@@ -94,6 +94,7 @@ async def run_chat(
 # ---------------------------------------------------------------------------
 
 def prepare(
+    llm: LlmClient,
     symbol: str,
     exchange: str,
     message: str,
@@ -106,8 +107,14 @@ def prepare(
 ) -> TurnState:
     settings = settings or get_settings()
     recorder = recorder or TurnRecorder()
+    # Built before the toolbox, and handed to it, so a tool's own LLM call
+    # (generate_custom_indicator writes formulas with one) records into the
+    # exact same Budget the loop below is also recording into — not a second,
+    # invisible one that never reaches the turn's usage total.
+    budget = Budget.from_settings(settings)
     box = toolbox or AgentToolbox(symbol, exchange, df, user_id,
-                                  settings=settings, recorder=recorder)
+                                  settings=settings, recorder=recorder,
+                                  llm=llm, budget=budget)
     last_price = round(float(df["close"].iloc[-1]), 2)
     turn_id = new_turn_id()
 
@@ -130,7 +137,7 @@ def prepare(
     return TurnState(
         turn_id=turn_id, symbol=symbol, exchange=exchange, last_price=last_price,
         transcript=transcript, box=box, recorder=recorder,
-        budget=Budget.from_settings(settings), settings=settings, user_id=user_id,
+        budget=budget, settings=settings, user_id=user_id,
     )
 
 
@@ -259,6 +266,17 @@ def _emit_outputs(state: TurnState) -> None:
                 parts.append(f"hid {', '.join(removed)}")
             state.recorder.emit(EventKind.DRAWING, f"Chart: {' and '.join(parts)}",
                                 add=added, remove=removed)
+
+    # Same gap, same fix: a custom indicator changes the chart just as much as
+    # a built-in one being toggled on, but it lands in `custom_indicators`
+    # inside `results`, not `drawings` — so without this it left no trace either.
+    custom = state.box.results.get("custom_indicators")
+    if isinstance(custom, list) and custom:
+        names = [str(c.get("name")) for c in custom if isinstance(c, dict)]
+        labels = [str(c.get("displayLabel") or c.get("name")) for c in custom if isinstance(c, dict)]
+        noun = "indicator" if len(labels) == 1 else "indicators"
+        state.recorder.emit(EventKind.DRAWING, f"Chart: added custom {noun} {', '.join(labels)}",
+                            names=names, labels=labels)
 
     strategy = state.box.results.get("strategy")
     if isinstance(strategy, dict) and "error" not in strategy:
