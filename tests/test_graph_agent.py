@@ -180,6 +180,37 @@ def test_extract_pane_defaults_to_sub_when_the_model_drops_the_line():
     assert source == "result = line(ema(close, 20))"
 
 
+def test_system_prompt_mentions_exp_and_gaussian_guidance():
+    """Found live: the writer LLM silently substituted a plain ema() and
+    labeled it "Gaussian-like" when asked for a Gaussian filter, because
+    there was no exp() to build the real thing and no guidance steering it
+    away from faking it. Both must be present now."""
+    from app.signals.agent.tools.graph_agent import SYSTEM_PROMPT
+
+    assert "exp(x)" in SYSTEM_PROMPT
+    assert "Gaussian" in SYSTEM_PROMPT
+    assert 'Never substitute a plain ema()/sma() and call it "Gaussian-like"' in SYSTEM_PROMPT
+
+
+@pytest.mark.skipif(shutil.which("diascript-validate") is None, reason="diascript-validate not installed")
+@pytest.mark.asyncio
+async def test_the_prompts_own_gaussian_filter_example_is_actually_valid_diascript():
+    """The worked example in SYSTEM_PROMPT is what the model pattern-matches
+    against — if it doesn't actually validate, every real Gaussian filter
+    request built from it would fail too."""
+    from app.signals.agent.tools.graph_agent import _validate_via_node
+
+    gaussian_example = (
+        "w0 = exp(0)\nw1 = exp(-1/18)\nw2 = exp(-4/18)\nw3 = exp(-9/18)\n"
+        "w4 = exp(-16/18)\nw5 = exp(-25/18)\nw6 = exp(-36/18)\nw7 = exp(-49/18)\nw8 = exp(-64/18)\n"
+        "wsum = w0+w1+w2+w3+w4+w5+w6+w7+w8\n"
+        "result = line((w0*close + w1*ref(close,1) + w2*ref(close,2) + w3*ref(close,3) + "
+        "w4*ref(close,4) + w5*ref(close,5) + w6*ref(close,6) + w7*ref(close,7) + w8*ref(close,8)) / wsum)"
+    )
+    result = await _validate_via_node(gaussian_example, "result")
+    assert result == {"valid": True, "outputType": "line"}
+
+
 def test_system_prompt_never_offers_barcolor_as_a_safe_output_wrapper():
     """barcolor(...) parses fine — diascript-validate only checks that SOME
     output wrapper was used, it doesn't know which ones the real klinecharts

@@ -50,10 +50,23 @@ marker(...), histogram(...), or background(...).
 - Available series: open, high, low, close, volume.
 - Available functions: sma(series, length), ema(series, length), \
 wma(series, length), stdev(series, length), highest(series, length), \
-lowest(series, length), sum(series, length), rsi(series, length), \
+lowest(series, length), sum(series, length), highestbars(series, length) \
+(bar-offset of the highest value in the window, 0=most recent), \
+lowestbars(series, length), rsi(series, length), \
 true_range(), typical_price(), abs(x), min(a, b), max(a, b), \
+log(x), sqrt(x), exp(x), \
 ref(series, n) (value n bars back, null before history starts), \
 prev(n) (this same formula's own value n bars back).
+- For anything needing weighted-average-style math over a FIXED small \
+window (a Gaussian filter, ALMA, a custom weighted moving average), \
+write the weights out explicitly as literal numbers for each `ref(x, k)` \
+term (k = 0 to window-1) rather than looking for a loop — there is no \
+loop construct, every window is unrolled by hand at authoring time. \
+exp(x) is what makes a real Gaussian-shaped weight kernel possible: \
+weight(k) = exp(-(k*k) / (2*sigma*sigma)), normalized so the weights sum \
+to 1. Never substitute a plain ema()/sma() and call it "Gaussian-like" — \
+if the request needs real Gaussian weights, compute them with exp() for \
+real, using the primitives above.
 - Point-wise math (+, -, *, /), comparisons, and and/or/not are allowed \
 between series and numbers.
 - band(upper, lower) takes the UPPER bound first, the LOWER bound second. \
@@ -78,6 +91,21 @@ Input: RSI with a 21-period length
 Output:
 PANE: sub
 result = line(rsi(close, 21))
+
+Input: a Gaussian filter trend indicator
+Output:
+PANE: main
+w0 = exp(0)
+w1 = exp(-1/18)
+w2 = exp(-4/18)
+w3 = exp(-9/18)
+w4 = exp(-16/18)
+w5 = exp(-25/18)
+w6 = exp(-36/18)
+w7 = exp(-49/18)
+w8 = exp(-64/18)
+wsum = w0+w1+w2+w3+w4+w5+w6+w7+w8
+result = line((w0*close + w1*ref(close,1) + w2*ref(close,2) + w3*ref(close,3) + w4*ref(close,4) + w5*ref(close,5) + w6*ref(close,6) + w7*ref(close,7) + w8*ref(close,8)) / wsum)
 
 Input: a band around price at 2 standard deviations
 Output:
