@@ -30,16 +30,18 @@ async def test_valid_on_first_try(trending_frame):
     box = _toolbox(trending_frame)
     with (
         patch("app.signals.agent.tools.graph_agent._write_formula",
-              return_value="result = line(ema(close, 20))"),
+              return_value=("main", "result = line(ema(close, 20))")),
         patch("app.signals.agent.tools.graph_agent._validate_via_node",
               return_value={"valid": True, "outputType": "line"}),
     ):
         result = await box.execute("generate_custom_indicator", {"description": "20 EMA", "label": "EMA 20"})
 
     assert result["created"].startswith("DIA_CUSTOM_")
+    assert result["pane"] == "main"
     assert box.results["custom_indicators"][0]["source"] == "result = line(ema(close, 20))"
     assert box.results["custom_indicators"][0]["outputName"] == "result"
     assert box.results["custom_indicators"][0]["displayLabel"] == "EMA 20"
+    assert box.results["custom_indicators"][0]["pane"] == "main"
 
 
 @pytest.mark.asyncio
@@ -49,7 +51,7 @@ async def test_invalid_then_valid_on_retry(trending_frame):
 
     async def fake_write(ctx, description, feedback=None, source=None):
         write_calls.append(feedback)
-        return "result = line(ema(close, 20))" if feedback else "not diascript at all"
+        return ("main", "result = line(ema(close, 20))") if feedback else ("main", "not diascript at all")
 
     async def fake_validate(source: str, output_name: str) -> dict:
         if source == "not diascript at all":
@@ -73,7 +75,7 @@ async def test_invalid_twice_returns_error_without_touching_results(trending_fra
     box = _toolbox(trending_frame)
 
     async def fake_write(ctx, description, feedback=None, source=None):
-        return "still not diascript"
+        return "main", "still not diascript"
 
     async def fake_validate(source: str, output_name: str) -> dict:
         return {"valid": False, "error": {"message": "unexpected token"}}
@@ -111,7 +113,7 @@ async def test_different_formulas_in_the_same_turn_get_distinct_names(trending_f
     box = _toolbox(trending_frame)
 
     async def fake_write(ctx, description, feedback=None, source=None):
-        return f"result = line(ema(close, {description}))"
+        return "main", f"result = line(ema(close, {description}))"
 
     with (
         patch("app.signals.agent.tools.graph_agent._write_formula", new=fake_write),
@@ -136,7 +138,7 @@ async def test_the_identical_formula_gets_the_same_name_even_across_separate_too
     ToolContext instances, each with its own would-be counter starting at
     zero) is idempotent instead of colliding on an unrelated formula."""
     async def fake_write(ctx, description, feedback=None, source=None):
-        return "result = line(ema(close, 20))"
+        return "main", "result = line(ema(close, 20))"
 
     with (
         patch("app.signals.agent.tools.graph_agent._write_formula", new=fake_write),
@@ -149,6 +151,33 @@ async def test_the_identical_formula_gets_the_same_name_even_across_separate_too
         second = await turn_two.execute("generate_custom_indicator", {"description": "the 20 period EMA"})
 
     assert first["created"] == second["created"]
+
+
+def test_extract_pane_parses_main_and_strips_the_line():
+    from app.signals.agent.tools.graph_agent import _extract_pane
+
+    pane, source = _extract_pane("PANE: main\nresult = line(ema(close, 20))")
+    assert pane == "main"
+    assert source == "result = line(ema(close, 20))"
+
+
+def test_extract_pane_parses_sub_case_insensitively():
+    from app.signals.agent.tools.graph_agent import _extract_pane
+
+    pane, source = _extract_pane("pane: SUB\nresult = line(rsi(close, 14))")
+    assert pane == "sub"
+    assert source == "result = line(rsi(close, 14))"
+
+
+def test_extract_pane_defaults_to_sub_when_the_model_drops_the_line():
+    """Found live: a mis-paned overlay is just an extra pane, but a
+    mis-paned oscillator overlapping candles at the wrong scale is worse --
+    "sub" is the safer default when the model didn't say."""
+    from app.signals.agent.tools.graph_agent import _extract_pane
+
+    pane, source = _extract_pane("result = line(ema(close, 20))")
+    assert pane == "sub"
+    assert source == "result = line(ema(close, 20))"
 
 
 def test_system_prompt_never_offers_barcolor_as_a_safe_output_wrapper():
@@ -322,8 +351,8 @@ async def test_a_disallowed_output_type_is_treated_as_a_validation_failure_and_r
     async def fake_write(ctx, description, feedback=None, source=None):
         write_calls.append(feedback)
         if feedback:
-            return "result = line(ema(close, 20))"
-        return 'result = barcolor(close > open, "green", "red")'
+            return "main", "result = line(ema(close, 20))"
+        return "sub", 'result = barcolor(close > open, "green", "red")'
 
     async def fake_validate(source: str, output_name: str) -> dict:
         if "barcolor" in source:
@@ -347,7 +376,7 @@ async def test_a_disallowed_output_type_that_survives_the_retry_is_an_error(tren
     box = _toolbox(trending_frame)
 
     async def fake_write(ctx, description, feedback=None, source=None):
-        return "result = fill(a, b)"
+        return "main", "result = fill(a, b)"
 
     async def fake_validate(source: str, output_name: str) -> dict:
         return {"valid": True, "outputType": "fill"}
@@ -377,8 +406,8 @@ async def test_the_retry_call_is_given_the_failed_source(trending_frame):
     async def fake_write(ctx, description, feedback=None, source=None):
         if feedback:
             seen_sources.append(source)
-            return "result = line(ema(close, 20))"
-        return "not diascript at all"
+            return "main", "result = line(ema(close, 20))"
+        return "main", "not diascript at all"
 
     async def fake_validate(source: str, output_name: str) -> dict:
         if source == "not diascript at all":
@@ -415,6 +444,9 @@ async def test_write_formula_puts_the_failed_source_in_the_retry_message():
     await graph_agent._write_formula(
         ctx, "20 EMA", feedback="Unexpected token ')' (line 1, col 26)", source="result = line(ema(close, ))",
     )
+    # _FakeLlm's response has no PANE: line -- _extract_pane defaults it to
+    # "sub", which is fine here since this test is only about the retry
+    # message content, not pane classification.
 
     sent = llm.calls[0]["messages"][-1]["content"]
     assert "result = line(ema(close, ))" in sent
@@ -437,9 +469,10 @@ async def test_write_formula_strips_a_markdown_code_fence():
             )
 
     ctx = SimpleNamespace(llm=_FencedLlm(), budget=Budget.from_settings(get_settings()))
-    source = await graph_agent._write_formula(ctx, "20 EMA")
+    pane, source = await graph_agent._write_formula(ctx, "20 EMA")
 
     assert source == "result = line(ema(close, 20))"
+    assert pane == "sub"  # no PANE: line in the fenced response -- defaults to "sub"
 
 
 @pytest.mark.asyncio
@@ -455,9 +488,10 @@ async def test_write_formula_strips_a_bare_code_fence_with_no_language_tag():
             )
 
     ctx = SimpleNamespace(llm=_FencedLlm(), budget=Budget.from_settings(get_settings()))
-    source = await graph_agent._write_formula(ctx, "close price")
+    pane, source = await graph_agent._write_formula(ctx, "close price")
 
     assert source == "result = line(close)"
+    assert pane == "sub"
 
 
 # ---------------------------------------------------------------------------

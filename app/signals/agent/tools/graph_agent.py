@@ -29,10 +29,19 @@ VALIDATE_TIMEOUT_SECONDS = 5
 RENDERABLE_OUTPUT_TYPES = {"line", "band", "marker", "histogram", "background"}
 
 _CODE_FENCE_RE = re.compile(r"^```[^\n]*\n?(.*?)\n?```$", re.DOTALL)
+_PANE_LINE_RE = re.compile(r"^PANE:\s*(main|sub)\s*$", re.IGNORECASE | re.MULTILINE)
 
 SYSTEM_PROMPT = """You write diascript — a small, safe formula language for \
-technical indicators. Output ONLY diascript source, nothing else: no prose, \
-no markdown fences, no explanation.
+technical indicators. Output exactly two things, nothing else — no prose, \
+no extra markdown fences, no explanation:
+
+1. A first line stating where this indicator belongs on the chart: \
+`PANE: main` if it overlays directly on the price chart, same scale as price \
+(moving averages, bands, trend/smoothing filters, price channels) — or \
+`PANE: sub` if it needs its own separate pane below the price chart, a \
+different scale than price (oscillators, momentum indicators, anything \
+volume-based, anything bounded like 0-100).
+2. Then the diascript formula on the following line(s).
 
 Rules:
 - Exactly one formula, always named `result`.
@@ -62,22 +71,27 @@ Examples:
 
 Input: the 20-EMA minus the 50-EMA
 Output:
+PANE: main
 result = line(ema(close, 20) - ema(close, 50))
 
 Input: RSI with a 21-period length
 Output:
+PANE: sub
 result = line(rsi(close, 21))
 
 Input: a band around price at 2 standard deviations
 Output:
+PANE: main
 result = band(close + stdev(close, 20) * 2, close - stdev(close, 20) * 2)
 
 Input: mark bars where RSI crosses above 70 with a red down-triangle
 Output:
+PANE: sub
 result = marker(rsi(close, 14) > 70, "triangle-down", "#F44336")
 
 Input: highlight the background red when price is below its 50-SMA
 Output:
+PANE: main
 result = background(close < sma(close, 50), "#F44336")
 """
 
@@ -95,9 +109,24 @@ def _strip_code_fence(text: str) -> str:
     return match.group(1).strip() if match else text
 
 
+def _extract_pane(text: str) -> tuple[str, str]:
+    """Pulls the leading `PANE: main`/`PANE: sub` line back out, returning
+    (pane, remaining_source). Defaults to "sub" if the model dropped the
+    line entirely — the safer default, since a wrongly-sub-paned overlay is
+    just an extra pane, but a wrongly-main-paned oscillator overlaps candles
+    at the wrong scale."""
+    match = _PANE_LINE_RE.search(text)
+    if not match:
+        return "sub", text
+    pane = match.group(1).lower()
+    remaining = (text[:match.start()] + text[match.end():]).strip()
+    return pane, remaining
+
+
 async def _write_formula(
     ctx: ToolContext, description: str, feedback: str | None = None, source: str | None = None,
-) -> str:
+) -> tuple[str, str]:
+    """Returns (pane, source) — see _extract_pane."""
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     if feedback:
         content = f"{description}\n\nYou wrote:\n{source}\n\nThat failed to validate: {feedback}\nFix it."
@@ -111,7 +140,8 @@ async def _write_formula(
     # like every other LLM call the turn makes.
     response = await asyncio.to_thread(ctx.llm.chat, temperature=0, max_tokens=300, messages=messages)
     ctx.budget.record(response)
-    return _strip_code_fence((response.choices[0].message.content or "").strip())
+    raw = _strip_code_fence((response.choices[0].message.content or "").strip())
+    return _extract_pane(raw)
 
 
 async def _validate_via_node(source: str, output_name: str) -> dict:
@@ -188,13 +218,13 @@ async def generate_custom_indicator(ctx: ToolContext, args: dict) -> Any:
         return {"error": "A description of the indicator is required."}
 
     output_name = "result"
-    source = await _write_formula(ctx, description)
+    pane, source = await _write_formula(ctx, description)
     result = await _validate_via_node(source, output_name)
     feedback = _validation_feedback(result)
 
     if feedback:
         failed_source = source
-        source = await _write_formula(ctx, description, feedback=feedback, source=failed_source)
+        pane, source = await _write_formula(ctx, description, feedback=feedback, source=failed_source)
         result = await _validate_via_node(source, output_name)
         feedback = _validation_feedback(result)
 
@@ -212,9 +242,9 @@ async def generate_custom_indicator(ctx: ToolContext, args: dict) -> Any:
 
     ctx.results.setdefault("custom_indicators", []).append({
         "name": indicator_name, "source": source,
-        "outputName": output_name, "displayLabel": display_label,
+        "outputName": output_name, "displayLabel": display_label, "pane": pane,
     })
-    return {"created": indicator_name, "label": display_label}
+    return {"created": indicator_name, "label": display_label, "pane": pane}
 
 
 TOOLS: dict[str, Handler] = {
