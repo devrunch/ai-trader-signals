@@ -43,9 +43,12 @@ def test_account_tools_are_not_offered_without_a_user():
 
 
 def test_gating_on_a_missing_user_saves_real_tokens():
+    """Not a fixed ratio forever — every non-account tool added since dilutes
+    it further, since the gated-out set (account tools) stays the same size
+    while the whole grows. 0.8 still means real savings, with headroom."""
     full = len(json.dumps(TOOL_SCHEMAS))
     gated = len(json.dumps(schemas_for(TOOL_SCHEMAS, user_id=None)))
-    assert gated < full * 0.75
+    assert gated < full * 0.8
 
 
 def test_a_tool_that_has_run_out_of_budget_stops_being_offered():

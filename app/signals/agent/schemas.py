@@ -340,4 +340,26 @@ TOOL_SCHEMAS: list[dict] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_custom_indicator",
+            "description": (
+                "Write and add a CUSTOM indicator to the chart from a plain-language "
+                "description — e.g. 'the 20-EMA minus the 50-EMA' or 'RSI with a "
+                "21-period length'. Use this when the request doesn't match a built-in "
+                "indicator (add_chart_indicator) or a known series (plot_series). The "
+                "formula is validated before it reaches the chart; if validation fails "
+                "twice, this returns an error instead of a broken indicator."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string", "description": "Plain-language description of the indicator to build"},
+                    "label": {"type": "string", "description": "Short display label for the chart legend, e.g. 'EMA Spread'"},
+                },
+                "required": ["description"],
+            },
+        },
+    },
 ]
