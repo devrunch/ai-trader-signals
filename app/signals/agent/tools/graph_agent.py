@@ -25,7 +25,7 @@ no markdown fences, no explanation.
 Rules:
 - Exactly one formula, always named `result`.
 - It must be wrapped in an output function: line(...), band(...), \
-marker(...), histogram(...), barcolor(...), or background(...).
+marker(...), histogram(...), or background(...).
 - Available series: open, high, low, close, volume.
 - Available functions: sma(series, length), ema(series, length), \
 wma(series, length), stdev(series, length), highest(series, length), \
@@ -35,11 +35,12 @@ ref(series, n) (value n bars back, null before history starts), \
 prev(n) (this same formula's own value n bars back).
 - Point-wise math (+, -, *, /), comparisons, and and/or/not are allowed \
 between series and numbers.
-- Do NOT use: held(), series(), input, fill(...), or the time/session/symbol \
-namespaces — none of these are needed for a single indicator formula (fill \
-needs two already-declared formulas to fill between, which a single-formula \
-file can never have), and using them raises the chance of a subtle scoping \
-mistake.
+- Do NOT use: held(), series(), input, fill(...), barcolor(...), or the \
+time/session/symbol namespaces. fill needs two already-declared formulas to \
+fill between, which a single-formula file can never have. barcolor is not \
+supported by the klinecharts render adapter this feature feeds. The rest \
+are not needed for a single indicator formula, and using them raises the \
+chance of a subtle scoping mistake.
 
 Examples:
 
@@ -79,11 +80,20 @@ async def _validate_via_node(source: str, output_name: str) -> dict:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+    except (FileNotFoundError, OSError) as e:
+        logger.warning("diascript-validate unavailable: %s", e)
+        return {"valid": False, "error": {"message": "validator unavailable"}}
+
+    try:
         stdout, stderr = await asyncio.wait_for(
             proc.communicate(source.encode()), timeout=VALIDATE_TIMEOUT_SECONDS,
         )
-    except (asyncio.TimeoutError, FileNotFoundError, OSError) as e:
-        logger.warning("diascript-validate unavailable: %s", e)
+    except asyncio.TimeoutError:
+        # wait_for only cancels the await — the OS process is still running
+        # and nothing else is tracking it, so it has to be reaped here.
+        proc.kill()
+        await proc.wait()
+        logger.warning("diascript-validate timed out after %ss", VALIDATE_TIMEOUT_SECONDS)
         return {"valid": False, "error": {"message": "validator unavailable"}}
 
     if proc.returncode != 0:
@@ -112,8 +122,11 @@ async def generate_custom_indicator(ctx: ToolContext, args: dict) -> Any:
         final_error = result.get("error", {}).get("message", "invalid formula")
         return {"error": f"Could not build a valid indicator: {final_error}"}
 
-    seq = ctx.results.get("_custom_indicator_seq", 0) + 1
-    ctx.results["_custom_indicator_seq"] = seq
+    # Private per-turn bookkeeping, deliberately NOT a key inside ctx.results —
+    # that dict is serialised verbatim as the turn's browser-facing payload
+    # (see turn.py), and a sequence counter is not a result.
+    seq = getattr(ctx, "_custom_indicator_seq", 0) + 1
+    ctx._custom_indicator_seq = seq
     display_label = str(args.get("label") or description)[:60]
     indicator_name = f"DIA_CUSTOM_{seq}"
 
