@@ -15,6 +15,7 @@ ends — which is where persistence will attach.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 
@@ -66,7 +67,7 @@ async def run_chat(
         # few hundred tokens instead of the ~2,400 of schemas that the analyst
         # resends on every one of its rounds.
         if getattr(state.settings, "triage_enabled", True):
-            decision = triage(llm, symbol, exchange, message, history)
+            decision = await asyncio.to_thread(triage, llm, symbol, exchange, message, history)
             # Counted whichever way it went. A turn triage handles is cheap, not
             # free, and one that never reached the daily budget would be a way
             # to spend without being charged.
@@ -158,7 +159,8 @@ async def loop(llm: LlmClient, state: TurnState) -> None:
         state.budget.start_round()
         state.recorder.emit(EventKind.THINKING, "Thinking", round=state.budget.rounds_used)
 
-        response = llm.chat(
+        response = await asyncio.to_thread(
+            llm.chat,
             temperature=0, max_tokens=900,
             messages=state.transcript.messages,
             # Not the whole set: schemas are resent every round, and a tool that
@@ -186,7 +188,7 @@ async def loop(llm: LlmClient, state: TurnState) -> None:
         await _run_tools(state, tool_calls)
 
     if not state.final_text:
-        state.final_text = _wrap_up(llm, state)
+        state.final_text = await _wrap_up(llm, state)
 
 
 def _exhausted(state: TurnState) -> frozenset[str]:
@@ -207,14 +209,16 @@ async def _run_tools(state: TurnState, tool_calls) -> None:
         state.transcript.add_tool_result(tc.id, result)
 
 
-def _wrap_up(llm: LlmClient, state: TurnState) -> str:
+async def _wrap_up(llm: LlmClient, state: TurnState) -> str:
     """One final tool-free call, so a budget-limited turn still answers.
 
     Not counted against the round budget — it is the turn's conclusion, not more
     research, and refusing it would trade a small cost for no answer at all.
     """
     state.transcript.add_instruction(WRAP_UP)
-    response = llm.chat(temperature=0, max_tokens=600, messages=state.transcript.messages)
+    response = await asyncio.to_thread(
+        llm.chat, temperature=0, max_tokens=600, messages=state.transcript.messages,
+    )
     state.budget.record(response)
     return (response.choices[0].message.content or "").strip()
 

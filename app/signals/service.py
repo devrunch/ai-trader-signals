@@ -18,6 +18,7 @@ be tested against fakes with no AWS account and no LLM endpoint.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import Mapping
@@ -218,7 +219,8 @@ class SignalService:
         data = None
         try:
             for _ in range(self.settings.signal_max_tool_rounds):  # cap tool-call rounds — never loop unbounded
-                resp = self.llm.chat(
+                resp = await asyncio.to_thread(
+                    self.llm.chat,
                     temperature=0, max_tokens=700,
                     messages=messages, tools=[prompts.CANDLE_TOOL], tool_choice="auto",
                 )
@@ -247,7 +249,8 @@ class SignalService:
             # to a single plain call rather than failing the signal entirely.
             logger.warning("Tool-calling LLM call failed for %s (%s) — retrying without tools", symbol, e)
             try:
-                resp = self.llm.chat(
+                resp = await asyncio.to_thread(
+                    self.llm.chat,
                     temperature=0, max_tokens=512,
                     messages=[
                         {"role": "system", "content": prompts.SIGNAL_SYSTEM_NO_TOOLS},

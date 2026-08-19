@@ -362,7 +362,8 @@ async def _narrative(llm: LlmClient, cues: dict, candidates: list[dict]) -> str:
     )
 
     try:
-        resp = llm.chat(
+        resp = await asyncio.to_thread(
+            llm.chat,
             temperature=0, max_tokens=350,
             messages=[
                 {"role": "system", "content": prompts.BRIEF_SYSTEM},
