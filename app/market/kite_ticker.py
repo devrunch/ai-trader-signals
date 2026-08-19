@@ -18,6 +18,8 @@ from typing import Any
 
 from kiteconnect import KiteTicker
 
+from app.market.providers.kite_provider import kite_symbol
+
 logger = logging.getLogger(__name__)
 
 
@@ -58,7 +60,7 @@ class KiteTickerClient:
 
     def _resolve(self, symbol: str, exchange: str) -> int | None:
         self._provider._ensure_instruments()
-        row = self._provider._instruments.get(exchange.upper(), {}).get(symbol.upper())
+        row = self._provider._instruments.get(exchange.upper(), {}).get(kite_symbol(symbol))
         return row["instrument_token"] if row else None
 
     def subscribe(self, symbol: str, exchange: str) -> bool:

@@ -43,6 +43,18 @@ _INTERVAL_MAP = {
     "1m": "minute", "5m": "5minute", "15m": "15minute", "1h": "60minute", "1d": "day",
 }
 
+# yfinance-style index tickers used elsewhere in this codebase (router.py's
+# /market/status, global_cues.py) -- Kite's own instrument dump names the
+# same instruments with a human-readable tradingsymbol that has a space in
+# it instead. Passing "^NSEI" straight through to Kite's quote()/instruments
+# lookup finds nothing and raises KeyError.
+_INDEX_ALIASES = {"^NSEI": "NIFTY 50", "^BSESN": "SENSEX"}
+
+
+def kite_symbol(symbol: str) -> str:
+    """The tradingsymbol Kite's own instrument dump actually uses."""
+    return _INDEX_ALIASES.get(symbol.upper(), symbol.upper())
+
 
 def _matches(haystack: str, needle: str, *, prefix_only: bool = False) -> bool:
     """Prefix or substring match, refusing one that runs into another
@@ -118,7 +130,7 @@ class KiteProvider:
     def _get_quote_sync(self, symbol: str, exchange: str) -> dict | None:
         try:
             self._ensure_token()
-            key = f"{exchange.upper()}:{symbol.upper()}"
+            key = f"{exchange.upper()}:{kite_symbol(symbol)}"
             data = self._kite.quote(key)[key]
             ltp = float(data["last_price"])
             ohlc = data["ohlc"]
@@ -161,7 +173,7 @@ class KiteProvider:
         try:
             self._ensure_token()
             self._ensure_instruments()
-            row = self._instruments.get(exchange.upper(), {}).get(symbol.upper())
+            row = self._instruments.get(exchange.upper(), {}).get(kite_symbol(symbol))
             if row is None:
                 return None
 
