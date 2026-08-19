@@ -33,6 +33,8 @@ async def test_valid_on_first_try(trending_frame):
               return_value=("main", "result = line(ema(close, 20))")),
         patch("app.signals.agent.tools.graph_agent._validate_via_node",
               return_value={"valid": True, "outputType": "line"}),
+        patch("app.signals.agent.tools.graph_agent._dynamic_check_via_node",
+              return_value={"valid": True}),
     ):
         result = await box.execute("generate_custom_indicator", {"description": "20 EMA", "label": "EMA 20"})
 
@@ -61,6 +63,8 @@ async def test_invalid_then_valid_on_retry(trending_frame):
     with (
         patch("app.signals.agent.tools.graph_agent._write_formula", new=fake_write),
         patch("app.signals.agent.tools.graph_agent._validate_via_node", new=fake_validate),
+        patch("app.signals.agent.tools.graph_agent._dynamic_check_via_node",
+              return_value={"valid": True}),
     ):
         result = await box.execute("generate_custom_indicator", {"description": "20 EMA"})
 
@@ -119,6 +123,8 @@ async def test_different_formulas_in_the_same_turn_get_distinct_names(trending_f
         patch("app.signals.agent.tools.graph_agent._write_formula", new=fake_write),
         patch("app.signals.agent.tools.graph_agent._validate_via_node",
               return_value={"valid": True, "outputType": "line"}),
+        patch("app.signals.agent.tools.graph_agent._dynamic_check_via_node",
+              return_value={"valid": True}),
     ):
         first = await box.execute("generate_custom_indicator", {"description": "20"})
         second = await box.execute("generate_custom_indicator", {"description": "50"})
@@ -144,6 +150,8 @@ async def test_the_identical_formula_gets_the_same_name_even_across_separate_too
         patch("app.signals.agent.tools.graph_agent._write_formula", new=fake_write),
         patch("app.signals.agent.tools.graph_agent._validate_via_node",
               return_value={"valid": True, "outputType": "line"}),
+        patch("app.signals.agent.tools.graph_agent._dynamic_check_via_node",
+              return_value={"valid": True}),
     ):
         turn_one = _toolbox(trending_frame)
         turn_two = _toolbox(trending_frame)
@@ -181,15 +189,16 @@ def test_extract_pane_defaults_to_sub_when_the_model_drops_the_line():
 
 
 def test_system_prompt_mentions_exp_and_gaussian_guidance():
-    """Found live: the writer LLM silently substituted a plain ema() and
-    labeled it "Gaussian-like" when asked for a Gaussian filter, because
-    there was no exp() to build the real thing and no guidance steering it
-    away from faking it. Both must be present now."""
+    """A Gaussian filter needs exp()-based weights to be real, not a plain
+    ema()/sma() relabeled as "Gaussian-like" — the prompt must give the exact
+    math AND state the general rule against faking a named technique (the
+    general rule is checked on its own elsewhere; Gaussian's exp() guidance
+    is specific enough to warrant its own assertion here)."""
     from app.signals.agent.tools.graph_agent import SYSTEM_PROMPT
 
     assert "exp(x)" in SYSTEM_PROMPT
     assert "Gaussian" in SYSTEM_PROMPT
-    assert 'Never substitute a plain ema()/sma() and call it "Gaussian-like"' in SYSTEM_PROMPT
+    assert "Never fake sophistication" in SYSTEM_PROMPT
 
 
 @pytest.mark.skipif(shutil.which("diascript-validate") is None, reason="diascript-validate not installed")
@@ -214,14 +223,40 @@ async def test_the_prompts_own_gaussian_filter_example_is_actually_valid_diascri
 def test_system_prompt_never_offers_barcolor_as_a_safe_output_wrapper():
     """barcolor(...) parses fine — diascript-validate only checks that SOME
     output wrapper was used, it doesn't know which ones the real klinecharts
-    render adapter supports. The adapter has no case for barcolor (or fill)
-    and throws, so the prompt must never suggest it as something to wrap
-    `result` in — only ever list it among what NOT to use."""
+    render adapter supports. The adapter has no case for barcolor (recoloring
+    the candles themselves needs a different integration point than the
+    per-indicator figures every other output type goes through) and throws,
+    so the prompt must never suggest it as something to wrap `result` in —
+    only ever list it among what NOT to use."""
     from app.signals.agent.tools.graph_agent import SYSTEM_PROMPT
 
     wrap_rule, _, do_not_use = SYSTEM_PROMPT.partition("Do NOT use")
     assert "barcolor" not in wrap_rule
     assert "barcolor" in do_not_use
+
+
+def test_system_prompt_teaches_fill_as_a_real_output_wrapper():
+    """fill() now maps onto klinecharts' real polygon figure type — it must
+    be taught as usable (with the bare-identifier-argument constraint that
+    makes it different from every other output wrapper), not forbidden.
+    Checked against the forbidden-items bullet specifically, not everything
+    after "Do NOT use" — the worked example a few paragraphs later
+    legitimately uses fill() too."""
+    from app.signals.agent.tools.graph_agent import SYSTEM_PROMPT
+
+    wrap_rule, _, rest = SYSTEM_PROMPT.partition("Do NOT use")
+    forbidden_bullet, _, _ = rest.partition("\n\n")
+    assert "fill(...)" in wrap_rule
+    assert "fill" not in forbidden_bullet
+    assert "bare NAME of an already-declared formula" in SYSTEM_PROMPT
+    assert 'result = fill(upper, lower, "#2196F333")' in SYSTEM_PROMPT
+
+
+def test_renderable_output_types_includes_fill():
+    from app.signals.agent.tools.graph_agent import RENDERABLE_OUTPUT_TYPES
+
+    assert "fill" in RENDERABLE_OUTPUT_TYPES
+    assert "barcolor" not in RENDERABLE_OUTPUT_TYPES
 
 
 @pytest.mark.asyncio
@@ -393,6 +428,8 @@ async def test_a_disallowed_output_type_is_treated_as_a_validation_failure_and_r
     with (
         patch("app.signals.agent.tools.graph_agent._write_formula", new=fake_write),
         patch("app.signals.agent.tools.graph_agent._validate_via_node", new=fake_validate),
+        patch("app.signals.agent.tools.graph_agent._dynamic_check_via_node",
+              return_value={"valid": True}),
     ):
         result = await box.execute("generate_custom_indicator", {"description": "color bars"})
 
@@ -448,6 +485,8 @@ async def test_the_retry_call_is_given_the_failed_source(trending_frame):
     with (
         patch("app.signals.agent.tools.graph_agent._write_formula", new=fake_write),
         patch("app.signals.agent.tools.graph_agent._validate_via_node", new=fake_validate),
+        patch("app.signals.agent.tools.graph_agent._dynamic_check_via_node",
+              return_value={"valid": True}),
     ):
         await box.execute("generate_custom_indicator", {"description": "20 EMA"})
 
@@ -551,8 +590,12 @@ async def test_the_writer_llm_call_uses_the_turns_client_and_records_its_usage(t
     budget = Budget.from_settings(get_settings())
     box = _toolbox(trending_frame, llm=llm, budget=budget)
 
-    with patch("app.signals.agent.tools.graph_agent._validate_via_node",
-              return_value={"valid": True, "outputType": "line"}):
+    with (
+        patch("app.signals.agent.tools.graph_agent._validate_via_node",
+              return_value={"valid": True, "outputType": "line"}),
+        patch("app.signals.agent.tools.graph_agent._dynamic_check_via_node",
+              return_value={"valid": True}),
+    ):
         result = await box.execute("generate_custom_indicator", {"description": "20 EMA"})
 
     assert "created" in result
@@ -580,3 +623,314 @@ async def test_real_validator_accepts_a_valid_formula_and_rejects_an_invalid_one
 
     invalid = await _validate_via_node("result = line(ema(close, ))", "result")
     assert invalid["valid"] is False
+
+
+# ---------------------------------------------------------------------------
+# Fix 6: static parsing is not enough. diascript-validate only checks that a
+# formula parses and names a real output wrapper -- it never executes it, so
+# it cannot see a formula that crashes on real bars (e.g. `ref()` pointing
+# past the edge of loaded history) or one whose condition can mathematically
+# never be true (e.g. comparing a bar against a window that already includes
+# it). `_dynamic_check_via_node` actually runs the formula against synthetic
+# bars through the real diascript engine to catch both classes before they
+# reach a user's chart.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_dynamic_check_is_skipped_when_static_validation_already_failed(trending_frame):
+    """The dynamic gate is a second, more expensive check -- it must never
+    run on a formula that already failed the cheap parse check."""
+    box = _toolbox(trending_frame)
+    dynamic_calls = []
+
+    async def fake_dynamic(source, output_name):
+        dynamic_calls.append(source)
+        return {"valid": True}
+
+    with (
+        patch("app.signals.agent.tools.graph_agent._write_formula",
+              return_value=("main", "not diascript at all")),
+        patch("app.signals.agent.tools.graph_agent._validate_via_node",
+              return_value={"valid": False, "error": {"message": "unexpected token"}}),
+        patch("app.signals.agent.tools.graph_agent._dynamic_check_via_node", new=fake_dynamic),
+    ):
+        result = await box.execute("generate_custom_indicator", {"description": "bad request"})
+
+    assert "error" in result
+    assert dynamic_calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_dynamic_check_failure_triggers_a_retry_with_its_feedback(trending_frame):
+    """A formula that parses fine but fails the real-data check must be
+    eligible for the same one retry a parse failure gets -- and the model
+    must see the ACTUAL dynamic-check message, not a generic one."""
+    box = _toolbox(trending_frame)
+    write_calls = []
+
+    async def fake_write(ctx, description, feedback=None, source=None):
+        write_calls.append(feedback)
+        if feedback:
+            return "main", "result = line(ema(close, 20))"
+        return "main", "result = line(ref(close, -1))"
+
+    async def fake_dynamic(source, output_name):
+        if "ref(close, -1)" in source:
+            return {"valid": False, "error": {"message": "crashes on the newest candles"}}
+        return {"valid": True}
+
+    with (
+        patch("app.signals.agent.tools.graph_agent._write_formula", new=fake_write),
+        patch("app.signals.agent.tools.graph_agent._validate_via_node",
+              return_value={"valid": True, "outputType": "line"}),
+        patch("app.signals.agent.tools.graph_agent._dynamic_check_via_node", new=fake_dynamic),
+    ):
+        result = await box.execute("generate_custom_indicator", {"description": "trend filter"})
+
+    assert len(write_calls) == 2
+    assert write_calls[0] is None
+    assert write_calls[1] == "crashes on the newest candles"
+    assert "created" in result
+
+
+@pytest.mark.asyncio
+async def test_a_dynamic_check_failure_that_survives_the_retry_is_an_error(trending_frame):
+    box = _toolbox(trending_frame)
+
+    with (
+        patch("app.signals.agent.tools.graph_agent._write_formula",
+              return_value=("main", "result = line(ref(close, -1))")),
+        patch("app.signals.agent.tools.graph_agent._validate_via_node",
+              return_value={"valid": True, "outputType": "line"}),
+        patch("app.signals.agent.tools.graph_agent._dynamic_check_via_node",
+              return_value={"valid": False, "error": {"message": "crashes on the newest candles"}}),
+    ):
+        result = await box.execute("generate_custom_indicator", {"description": "trend filter"})
+
+    assert "error" in result
+    assert "crashes on the newest candles" in result["error"]
+    assert "custom_indicators" not in box.results
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+@pytest.mark.asyncio
+async def test_real_dynamic_check_catches_a_negative_ref_offset_crashing_on_real_bars():
+    """A centered/symmetric filter built from ref(close, -1)..ref(close, -4)
+    is valid diascript, but a negative offset asks for a bar that hasn't
+    happened yet -- it crashes the render adapter on the newest candles,
+    where there is no "future" bar to read. The real (non-mocked) checker
+    must catch this."""
+    from app.signals.agent.tools.graph_agent import _dynamic_check_via_node
+
+    source = (
+        "trend = (ref(close, 4) + ref(close, 3) + ref(close, 2) + ref(close, 1) + close + "
+        "ref(close, -1) + ref(close, -2) + ref(close, -3) + ref(close, -4)) / 9\n"
+        "result = line(trend)"
+    )
+    result = await _dynamic_check_via_node(source, "result")
+    assert result["valid"] is False
+    assert "crashes" in result["error"]["message"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+@pytest.mark.asyncio
+async def test_real_dynamic_check_catches_a_condition_that_can_never_fire():
+    """Comparing close against highest(high, 10) is a no-op — that window
+    already includes the current bar's own high, so close can never exceed
+    it. The marker would sit on the chart doing nothing, forever, with no
+    error anywhere. The real (non-mocked) checker must catch this."""
+    from app.signals.agent.tools.graph_agent import _dynamic_check_via_node
+
+    source = (
+        "swing_high = highest(high, 10)\n"
+        "break_cond = close > swing_high and ref(close, 1) <= ref(swing_high, 1)\n"
+        'result = marker(break_cond, "triangle-up", "#4CAF50")'
+    )
+    result = await _dynamic_check_via_node(source, "result")
+    assert result["valid"] is False
+    assert "never true" in result["error"]["message"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+@pytest.mark.asyncio
+async def test_real_dynamic_check_catches_division_by_zero_on_a_flat_market():
+    """A Fisher-Transform-style formula dividing by (highest - lowest) is
+    correct on a normal market and NaN/Infinity when the market is dead
+    flat, since the denominator goes to zero. The "flat" synthetic scenario
+    exists specifically to exercise that case."""
+    from app.signals.agent.tools.graph_agent import _dynamic_check_via_node
+
+    source = (
+        "range_ = highest(high, 10) - lowest(low, 10)\n"
+        "value = 2 * (close - lowest(low, 10)) / range_ - 1\n"
+        "result = line(0.5 * log((1 + value) / (1 - value)))"
+    )
+    result = await _dynamic_check_via_node(source, "result")
+    assert result["valid"] is False
+    assert "non-finite" in result["error"]["message"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+@pytest.mark.asyncio
+async def test_real_dynamic_check_passes_a_correctly_causal_weighted_filter():
+    """A real, causal, normalized weighted filter — using only past-bar
+    ref() offsets — must not be flagged."""
+    from app.signals.agent.tools.graph_agent import _dynamic_check_via_node
+
+    source = (
+        "w0 = exp(-0)\nw1 = exp(-1)\nw2 = exp(-4)\nw3 = exp(-9)\n"
+        "wsum = w0+w1+w2+w3\n"
+        "result = line((w0*close + w1*ref(close,1) + w2*ref(close,2) + w3*ref(close,3)) / wsum)"
+    )
+    result = await _dynamic_check_via_node(source, "result")
+    assert result["valid"] is True
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+@pytest.mark.asyncio
+async def test_the_prompts_own_order_block_example_is_real_and_passes_both_checks():
+    """held() gives real persistent state, which is what genuine Smart Money
+    Concepts / order-block logic needs. This exact worked example must pass
+    both the real validator and the real dynamic checker."""
+    from app.signals.agent.tools.graph_agent import _dynamic_check_via_node, _validate_via_node
+
+    source = (
+        "swing_high_now = high == highest(high, 10)\n"
+        "last_swing_high = held(swing_high_now, high)\n"
+        "bearish_candle = close < open\n"
+        "last_bear_ob_high = held(bearish_candle, high)\n"
+        "last_bear_ob_low = held(bearish_candle, low)\n"
+        "bos_up = close > ref(last_swing_high, 1) and ref(close, 1) <= ref(last_swing_high, 1)\n"
+        'result = marker(bos_up, "triangle-up", "#4CAF50")'
+    )
+    static = await _validate_via_node(source, "result")
+    assert static == {"valid": True, "outputType": "marker"}
+
+    dynamic = await _dynamic_check_via_node(source, "result")
+    assert dynamic["valid"] is True
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+@pytest.mark.asyncio
+async def test_the_prompts_own_wavelet_example_is_real_and_passes_both_checks():
+    """The stationary ("a trous") two-level Haar decomposition is a real
+    multi-scale decomposition built entirely from existing primitives —
+    variance drops monotonically from raw close to the level-1 to the
+    level-2 approximation, which is genuine scale separation, not just
+    smoothing. This exact worked example must pass both checks."""
+    from app.signals.agent.tools.graph_agent import _dynamic_check_via_node, _validate_via_node
+
+    source = (
+        "approx1 = (close + ref(close, 1)) / 2\n"
+        "detail1 = (close - ref(close, 1)) / 2\n"
+        "approx2 = (approx1 + ref(approx1, 2)) / 2\n"
+        "detail2 = (approx1 - ref(approx1, 2)) / 2\n"
+        "result = line(approx2)"
+    )
+    static = await _validate_via_node(source, "result")
+    assert static == {"valid": True, "outputType": "line"}
+
+    dynamic = await _dynamic_check_via_node(source, "result")
+    assert dynamic["valid"] is True
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+@pytest.mark.asyncio
+async def test_the_prompts_own_fill_example_is_real_and_passes_both_checks():
+    """fill() now maps onto klinecharts' real polygon figure type. This
+    exact worked example must pass both the real validator and the real
+    dynamic checker."""
+    from app.signals.agent.tools.graph_agent import _dynamic_check_via_node, _validate_via_node
+
+    source = (
+        "upper = ema(close, 20)\n"
+        "lower = ema(close, 50)\n"
+        'result = fill(upper, lower, "#2196F333")'
+    )
+    static = await _validate_via_node(source, "result")
+    assert static == {"valid": True, "outputType": "fill"}
+
+    dynamic = await _dynamic_check_via_node(source, "result")
+    assert dynamic["valid"] is True
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+@pytest.mark.asyncio
+async def test_real_dynamic_check_catches_a_fill_dividing_by_a_zero_range():
+    """fill()'s output object carries no series of its own (outputs.ts wraps
+    it as just {between, color}) — the dynamic checker has to pull the two
+    named series' OWN values out of result.values instead of the output
+    itself. This confirms that path actually inspects the real numbers,
+    rather than silently passing on an empty placeholder array."""
+    from app.signals.agent.tools.graph_agent import _dynamic_check_via_node
+
+    source = (
+        "spread = highest(high, 10) - lowest(low, 10)\n"
+        "upper = close + 1 / spread\n"
+        "lower = close - 1 / spread\n"
+        'result = fill(upper, lower, "#2196F333")'
+    )
+    result = await _dynamic_check_via_node(source, "result")
+    assert result["valid"] is False
+    assert "non-finite" in result["error"]["message"]
+
+
+def test_system_prompt_forbids_negative_ref_offsets():
+    """A negative ref() offset asks for a bar that hasn't happened yet, which
+    crashes the renderer on the newest candles. The prompt must forbid this
+    outright rather than relying on the dynamic gate alone to catch it after
+    the fact."""
+    from app.signals.agent.tools.graph_agent import SYSTEM_PROMPT
+
+    assert "n must be zero or a positive whole number" in SYSTEM_PROMPT
+    assert "bars forward" in SYSTEM_PROMPT
+
+
+def test_system_prompt_warns_about_self_inclusive_window_comparisons():
+    """close > highest(high, length) can never be true, since that window
+    already includes the current bar. The prompt must show the correct
+    ref(..., 1)-shifted pattern, and a worked example must demonstrate it
+    end to end."""
+    from app.signals.agent.tools.graph_agent import SYSTEM_PROMPT
+
+    assert "always include the CURRENT bar" in SYSTEM_PROMPT
+    assert "ref(highest(high, length), 1)" in SYSTEM_PROMPT
+    assert "prior_high = ref(highest(high, 10), 1)" in SYSTEM_PROMPT
+
+
+def test_system_prompt_never_fakes_sophistication_for_any_named_technique():
+    """A request naming a specific technique must get the real underlying
+    math, never a plain weighted filter or a generic breakout condition
+    relabeled with that technique's name. The honesty rule must be general —
+    it names Gaussian, wavelet AND Smart Money Concepts as techniques that
+    must be built for real, not approximated."""
+    from app.signals.agent.tools.graph_agent import SYSTEM_PROMPT
+
+    assert "Never fake sophistication" in SYSTEM_PROMPT
+    assert "wavelet" in SYSTEM_PROMPT.lower()
+    assert "smart money concepts" in SYSTEM_PROMPT.lower()
+
+
+def test_system_prompt_teaches_held_as_real_persistent_state_not_forbidden():
+    """held() is fully supported by diascript's own parser and validator, and
+    it is the primitive real Smart Money Concepts / order-block / break-of-
+    structure logic needs. The prompt must teach it, not forbid it, and a
+    worked example must use it."""
+    from app.signals.agent.tools.graph_agent import SYSTEM_PROMPT
+
+    do_not_use = SYSTEM_PROMPT.split("Do NOT use:", 1)[1]
+    assert "held()" not in do_not_use
+    assert "real persistent state" in SYSTEM_PROMPT
+    assert "last_swing_high = held(swing_high_now, high)" in SYSTEM_PROMPT
+
+
+def test_system_prompt_teaches_a_real_wavelet_decomposition():
+    """A stationary ("a trous") two-level Haar-style decomposition is
+    genuinely expressible with existing primitives, with no engine change
+    needed — it separates scales for real, rather than being a relabeled
+    moving average. The prompt must teach the actual construction, and a
+    worked example must use it."""
+    from app.signals.agent.tools.graph_agent import SYSTEM_PROMPT
+
+    assert "à trous" in SYSTEM_PROMPT or "a trous" in SYSTEM_PROMPT.lower()
+    assert "approx2 = (approx1 + ref(approx1, 2)) / 2" in SYSTEM_PROMPT
