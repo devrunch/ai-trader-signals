@@ -65,6 +65,33 @@ def test_a_fabricated_backtest_is_rejected_not_shown():
     assert not triage(_llm(fake_report), "RELIANCE", "NSE", "backtest my RSI strategy").handled
 
 
+def test_a_fabricated_chart_drawing_claim_is_rejected_not_shown():
+    """Triage has no chart tools -- any claim that something was marked,
+    drawn, or added to the chart has to be invented, the same class of
+    problem a fabricated backtest report is."""
+    fake_report = (
+        "**Smart Money Concepts Setup Applied:**\n"
+        "- **3 blocks marked** (green rectangles on chart)\n"
+        "- **Bearish BOS marked** (red arrows on chart)"
+    )
+    assert not triage(
+        _llm(fake_report), "RELIANCE", "NSE", "add a Smart Money Concepts entry setup"
+    ).handled
+
+
+def test_triage_system_prompt_requires_handoff_for_anything_drawn_on_the_chart():
+    """The handoff criteria named "indicators" generically, which a live
+    request phrased as "add a Smart Money Concepts entry setup" did not
+    match -- triage answered it directly with a fabricated result instead
+    of handing off. The prompt must say plainly that ANYTHING drawn,
+    marked, or added to the chart needs the analyst, regardless of what
+    the user calls it."""
+    from app.signals.agent.triage import TRIAGE_SYSTEM
+
+    assert "adding, plotting, marking, or changing ANYTHING on the chart" in TRIAGE_SYSTEM
+    assert "Smart Money Concepts" in TRIAGE_SYSTEM
+
+
 def test_ordinary_small_talk_is_not_caught_by_the_fabrication_check():
     """The check is for backtest-report vocabulary specifically, not any
     number — the product-description answer triage is allowed to give

@@ -33,15 +33,18 @@ logger = logging.getLogger(__name__)
 HANDOFF = "HANDOFF"
 
 # Triage is handed no tools, ever — that is the entire security property this
-# module exists for. Its own prompt already says a backtest, a strategy or a
-# specific trade needs the analyst; this catches the turns where it answers
-# anyway instead of complying. Anything matching HAS to be invented, because
-# nothing on this path computed it. Same "validate before trusting" pattern as
-# an unknown series name in plot_series — the model got clear instructions,
-# this is what happens if they were not followed.
+# module exists for. Its own prompt already says a backtest, a strategy, a
+# specific trade, or anything drawn on the chart needs the analyst; this
+# catches the turns where it answers anyway instead of complying. Anything
+# matching HAS to be invented, because nothing on this path computed or drew
+# it. Same "validate before trusting" pattern as an unknown series name in
+# plot_series — the model got clear instructions, this is what happens if
+# they were not followed.
 _FABRICATED_RESULT = re.compile(
     r"\b(win rate|total trades|winning trades|losing trades|average win|average loss|"
-    r"total return|backtest results?|trade count|num_trades|entry signals|exit signals)\b",
+    r"total return|backtest results?|trade count|num_trades|entry signals|exit signals|"
+    r"blocks? marked|arrows? (on|plotted)|rectangles? (on|marked)|zones? marked|"
+    r"marked on (the )?chart|(added|drawn) to (the )?chart)\b",
     re.IGNORECASE,
 )
 
@@ -50,6 +53,10 @@ TRIAGE_SYSTEM = (
     "{symbol} ({exchange}). Decide who should answer.\n\n"
     "Reply with exactly the word HANDOFF, and nothing else, if answering would need any of:\n"
     "  - market data, prices, candles, indicators, support/resistance, trends\n"
+    "  - adding, plotting, marking, or changing ANYTHING on the chart itself — an indicator, "
+    "a drawing, a marker, a zone, a line, by any name the user gives it (Smart Money Concepts, "
+    "order blocks, Gaussian filter, or anything else) — even if you think you know what it would "
+    "look like. You have no chart tools; only the analyst can actually draw something\n"
     "  - the user's portfolio, positions, cash, risk or position sizing\n"
     "  - a backtest, a strategy, or the maths of a specific trade\n"
     "  - an opinion on what {symbol} or any other instrument is doing or might do\n\n"
@@ -113,7 +120,7 @@ def triage(llm, symbol: str, exchange: str, message: str,
         # analyst's usage should be added to it rather than replace it.
         return TriageResult(None, response)
     if _FABRICATED_RESULT.search(text):
-        logger.warning("Triage answered with backtest-shaped text — forcing handoff instead")
+        logger.warning("Triage answered with fabricated-result-shaped text — forcing handoff instead")
         return TriageResult(None, response)
     return TriageResult(text, response)
 
