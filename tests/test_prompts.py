@@ -13,3 +13,15 @@ def test_chat_system_prompt_forbids_describing_chart_changes_beyond_the_tool_res
     prompt = chat_system_prompt("RELIANCE", "NSE", 1314.1)
     assert "describe ONLY" in prompt
     assert "Never invent additional visual detail" in prompt
+
+
+def test_chat_system_prompt_forbids_contradicting_a_user_who_says_something_isnt_showing():
+    """Live bug: the user said "its not there" about a Gaussian filter
+    indicator, and the analyst replied "I can see the Gaussian filter
+    indicator is now displayed... it's working correctly" -- a claim about
+    the user's own browser it has no channel to verify. The prompt must
+    say plainly that it cannot see the user's screen and must not insist
+    otherwise."""
+    prompt = chat_system_prompt("RELIANCE", "NSE", 1314.1)
+    assert "no visibility into what is currently rendering in the user's browser" in prompt
+    assert "never insist it is there or working" in prompt
