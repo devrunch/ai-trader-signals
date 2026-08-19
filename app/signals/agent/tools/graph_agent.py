@@ -92,6 +92,18 @@ high/low, the last bearish or bullish candle before a break, and any other \
 real Smart Money Concepts order-block and break-of-structure logic. Do not \
 write these off as impossible; held() is exactly the primitive for them. \
 See the order-block worked example below.
+- held()'s pre-trigger 0 is a real price-scale value, not a "no data yet" \
+marker — if you ever plot a held() value directly with line(), the chart's \
+y-axis is real prices (hundreds or thousands), so every bar before the \
+first trigger renders as 0, and the line rockets from 0 up to the real \
+price the instant it fires. That is a chart-breaking spike, not a flat \
+lead-in. ALWAYS gate a held()-tracked LINE with a companion held() boolean \
+flag and divide by it — both are 0 before the first trigger, so 0/0 is a \
+real NaN, which the chart correctly skips instead of drawing: \
+`has_swing = held(condition, 1)` then `line(tracked_value / has_swing)`. \
+marker()/background() conditions built from held() do not need this — a \
+boolean condition that is merely false pre-trigger never draws anything, \
+there is no spike to gate.
 - For anything needing weighted-average-style math over a FIXED small \
 window (a Gaussian filter, ALMA, a custom weighted moving average), \
 write the weights out explicitly as literal numbers for each `ref(x, k)` \
@@ -196,6 +208,14 @@ last_bear_ob_high = held(bearish_candle, high)
 last_bear_ob_low = held(bearish_candle, low)
 bos_up = close > ref(last_swing_high, 1) and ref(close, 1) <= ref(last_swing_high, 1)
 result = marker(bos_up, "triangle-up", "#4CAF50")
+
+Input: plot the last confirmed swing high as a line on the chart
+Output:
+PANE: main
+swing_high_now = high == highest(high, 10)
+has_swing = held(swing_high_now, 1)
+last_swing_high = held(swing_high_now, high)
+result = line(last_swing_high / has_swing)
 
 Input: a wavelet transform indicator that decomposes price into trend and cycle components
 Output:

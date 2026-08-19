@@ -812,6 +812,78 @@ async def test_the_prompts_own_order_block_example_is_real_and_passes_both_check
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 @pytest.mark.asyncio
+async def test_the_prompts_own_guarded_swing_high_line_example_is_real_and_passes_both_checks():
+    """held()'s pre-trigger value is 0 -- a real price-scale number, not a
+    gap. Plotted directly as a line, every bar before the first trigger
+    renders at 0 and the line rockets from 0 up to the real price the
+    instant it fires: a chart-breaking spike found live. The has_swing-
+    divide pattern turns that into a real NaN (0/0), which the chart
+    correctly skips instead of drawing. This exact worked example must pass
+    both the real validator and the real dynamic checker."""
+    from app.signals.agent.tools.graph_agent import _dynamic_check_via_node, _validate_via_node
+
+    source = (
+        "swing_high_now = high == highest(high, 10)\n"
+        "has_swing = held(swing_high_now, 1)\n"
+        "last_swing_high = held(swing_high_now, high)\n"
+        "result = line(last_swing_high / has_swing)"
+    )
+    static = await _validate_via_node(source, "result")
+    assert static == {"valid": True, "outputType": "line"}
+
+    dynamic = await _dynamic_check_via_node(source, "result")
+    assert dynamic["valid"] is True
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+@pytest.mark.asyncio
+async def test_a_held_line_without_the_guard_spikes_from_zero_before_first_trigger():
+    """The exact bug found live: a held()-tracked value plotted directly as
+    a line sits at 0 (a real price-scale value) for every bar before the
+    condition first fires, then jumps straight to the real price -- a
+    vertical spike from off-scale zero into the chart's real price range.
+    Confirms the raw (unguarded) pattern actually produces this, so the
+    guarded pattern below can be confirmed as the real fix, not just a
+    plausible-sounding one."""
+    import json
+    import subprocess
+
+    source = (
+        "swing_high_now = high == highest(high, 10)\n"
+        "last_swing_high = held(swing_high_now, high)\n"
+        "result = line(last_swing_high)"
+    )
+    script = (
+        "import path from 'node:path';"
+        "import { pathToFileURL } from 'node:url';"
+        "import { execSync } from 'node:child_process';"
+        "const root = execSync('npm root -g', {encoding:'utf8'}).trim();"
+        "const enginePath = path.join(root, 'diascript', 'dist', 'engine', 'engine.js');"
+        "const { evaluate } = await import(pathToFileURL(enginePath).href);"
+        f"const source = {json.dumps(source)};"
+        "const bars = Array.from({length: 20}, (_, i) => {"
+        "  const base = 1310 + i * 1.2;"
+        "  return {time: i, open: base, high: base + 1, low: base - 1, close: base, volume: 1000};"
+        "});"
+        "const { values } = await evaluate(source, bars, {});"
+        "console.log(JSON.stringify(values.result));"
+    )
+    proc = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        capture_output=True, timeout=15,
+    )
+    assert proc.returncode == 0, proc.stderr.decode()
+    result = json.loads(proc.stdout)
+
+    # Pre-trigger bars sit at the real-price-scale sentinel 0, not a gap --
+    # this is the spike. Once real swing highs start recording (bar 9
+    # onward for this fixture), the value tracks the real, rising price.
+    assert result[:9] == [0] * 9
+    assert result[9] > 1300
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+@pytest.mark.asyncio
 async def test_the_prompts_own_wavelet_example_is_real_and_passes_both_checks():
     """The stationary ("a trous") two-level Haar decomposition is a real
     multi-scale decomposition built entirely from existing primitives —
@@ -922,6 +994,20 @@ def test_system_prompt_teaches_held_as_real_persistent_state_not_forbidden():
     assert "held()" not in do_not_use
     assert "real persistent state" in SYSTEM_PROMPT
     assert "last_swing_high = held(swing_high_now, high)" in SYSTEM_PROMPT
+
+
+def test_system_prompt_warns_about_helds_zero_sentinel_before_first_trigger():
+    """Found live: a held()-tracked value plotted directly with line()
+    renders at 0 (a real price-scale number) for every bar before the
+    condition first fires, then jumps straight to the real price -- a
+    vertical spike from off-scale zero. The prompt must teach the
+    has_swing-divide guard that turns that into a real, chart-skippable
+    NaN, and a worked example must use it."""
+    from app.signals.agent.tools.graph_agent import SYSTEM_PROMPT
+
+    assert "chart-breaking spike" in SYSTEM_PROMPT
+    assert "has_swing = held(condition, 1)" in SYSTEM_PROMPT
+    assert "result = line(last_swing_high / has_swing)" in SYSTEM_PROMPT
 
 
 def test_system_prompt_teaches_a_real_wavelet_decomposition():

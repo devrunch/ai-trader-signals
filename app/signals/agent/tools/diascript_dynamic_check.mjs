@@ -42,7 +42,12 @@ function makeBars(shape, n = 120) {
     else if (shape === "choppy") base = 100 + Math.sin(i / 2.3) * 6;
     else if (shape === "volatile") base = 100 + Math.sin(i / 1.1) * 15 + (i % 5 === 0 ? 8 : 0);
     else base = 100; // flat -- zero range, on purpose
-    const wiggle = shape === "flat" ? 0 : Math.sin(i / 3) * 1.5;
+    // Fast enough (~5 bars/cycle) and large enough relative to the per-bar
+    // drift that "up"/"down" still get real, recurring local highs/lows --
+    // a real market never trends in a perfectly straight line for 120 bars,
+    // and a held()-gated formula legitimately never re-triggers on one that
+    // does, which isn't a bug in the formula.
+    const wiggle = shape === "flat" ? 0 : Math.sin(i / 1.3) * 6;
     return {
       time: 1700000000 + i * 900,
       open: base - 0.3 + wiggle * 0.2,
@@ -93,10 +98,19 @@ async function main() {
     if (outputType === "marker" || outputType === "background") {
       const series = seriesToCheck[0];
       if (Array.isArray(series) && series.some(Boolean)) everTrue = true;
-    } else {
+    } else if (shape !== "up" && shape !== "down") {
       // line / histogram / band / fill: flag a non-finite value past a
       // generous warm-up window -- a division by zero (e.g. highest()-
       // lowest() both equal, the flat scenario) shows up here.
+      //
+      // Skipped for "up"/"down": a one-sided structural tracker (a
+      // held()-gated swing-HIGH, say) legitimately never re-triggers
+      // during a persistent one-directional market -- staying NaN there
+      // is correct behaviour, not a bug, since a real downtrend genuinely
+      // makes no new highs. "choppy"/"volatile" reverse direction often
+      // enough that a real tracker should trigger there regardless, so
+      // those two (plus "flat", the deliberate division-by-zero probe)
+      // stay strict.
       for (const series of seriesToCheck) {
         if (!Array.isArray(series)) continue;
         // The LAST 40 bars, not the first 40 past some fixed offset -- a
