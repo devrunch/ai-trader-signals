@@ -10,3 +10,6 @@ build/
 .DS_Store
 
 .worktrees/
+
+# Node.js (app/pine_sandbox -- the PineTS sandbox subprocess)
+node_modules/

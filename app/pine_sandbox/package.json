@@ -1,0 +1,8 @@
+{
+  "name": "pine-sandbox",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "pinets": "^0.9.31"
+  }
+}
