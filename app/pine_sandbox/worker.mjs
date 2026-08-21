@@ -29,7 +29,11 @@ parentPort.on("message", async ({ source, bars, mode }) => {
         // caller iterating ctx.plots without filtering leaks six junk
         // series into whatever it does with the result.
         if (name.startsWith("__") && name.endsWith("__")) continue;
-        plots[name] = plot.data;
+        // Each point is {title, time, value, options} -- confirmed against
+        // the real package, not documented. `time` and `value` are the only
+        // fields worth forwarding; title duplicates the plot's own name key,
+        // options is a per-point render hint no caller here uses.
+        plots[name] = plot.data.map((p) => ({ time: p.time, value: p.value }));
       }
       parentPort.postMessage({ ok: true, plots, strategy: null, error: null });
     }
