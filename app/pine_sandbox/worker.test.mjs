@@ -34,3 +34,13 @@ test("malformed Pine returns a structured error, not a crash", () => {
   assert.equal(result.ok, false);
   assert.ok(result.error);
 });
+
+test("plots never leak PineTS's internal __xxx__ bookkeeping keys, only real plot() titles", () => {
+  // Confirmed against the real installed package: ctx.plots always carries
+  // __labels__/__lines__/__boxes__/__linefills__/__polylines__/__tables__
+  // regardless of whether the script used any of those -- a plain
+  // plot()-only script would otherwise leak six junk series to every caller.
+  const result = run({ source: `//@version=5\nindicator("t")\nplot(ta.sma(close, 5), "SMA5")`, bars: BARS, mode: "indicator" });
+  assert.equal(result.ok, true);
+  assert.deepEqual(Object.keys(result.plots), ["SMA5"]);
+});
