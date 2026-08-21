@@ -19,11 +19,14 @@ table locally.
 from __future__ import annotations
 
 # How much history to REQUEST for a given interval (product decision)
-DEFAULT_DAYS: dict[str, int] = {"1m": 5, "5m": 10, "15m": 20, "1h": 60, "1d": 400}
+DEFAULT_DAYS: dict[str, int] = {"1m": 5, "5m": 10, "15m": 20, "30m": 30, "1h": 60, "1d": 400}
 
 # How far back the vendor actually allows, with a safety margin — yfinance
 # rejects a range that touches the exact documented boundary.
-VENDOR_MAX_DAYS: dict[str, int] = {"1m": 6, "5m": 58, "15m": 58, "1h": 720}
+# "30m" sits between 15m and 1h below, same as the interval itself does --
+# not vendor-confirmed the way the others were (they came from empirical
+# tuning against real requests); revisit if real usage ever hits this ceiling.
+VENDOR_MAX_DAYS: dict[str, int] = {"1m": 6, "5m": 58, "15m": 58, "30m": 100, "1h": 720}
 
 # Used for intervals we have no entry for. The default window is deliberately
 # modest (an unknown interval is more likely intraday than daily); the vendor

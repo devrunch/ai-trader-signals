@@ -68,6 +68,30 @@ class TestGetQuote:
         assert result["prev_close"] == 1278.0
         assert result["change"] == pytest.approx(14.9, abs=0.01)
         assert result["volume"] == 12158451
+        # No "depth" key in this fixture -- must degrade to None, not KeyError.
+        assert result["bid"] is None
+        assert result["ask"] is None
+        assert result["spread"] is None
+
+    def test_extracts_top_of_book_bid_ask_from_depth(self):
+        provider = _provider_with_token()
+        provider._kite.quote = MagicMock(return_value={
+            "NSE:RELIANCE": {
+                "last_price": 1292.9,
+                "ohlc": {"open": 1279.8, "high": 1297.0, "low": 1275.3, "close": 1278.0},
+                "volume": 12158451,
+                "depth": {
+                    "buy": [{"price": 1292.8, "quantity": 50, "orders": 2}],
+                    "sell": [{"price": 1293.1, "quantity": 30, "orders": 1}],
+                },
+            }
+        })
+
+        result = provider._get_quote_sync("RELIANCE", "NSE")
+
+        assert result["bid"] == 1292.8
+        assert result["ask"] == 1293.1
+        assert result["spread"] == pytest.approx(0.3, abs=0.001)
 
     def test_a_kite_exception_returns_none_not_a_raise(self):
         from kiteconnect.exceptions import KiteException
@@ -117,6 +141,20 @@ class TestGetHistoricalDf:
         assert len(df) == 2
         called_token = provider._kite.historical_data.call_args[0][0]
         assert called_token == 738561  # RELIANCE's EQ instrument_token, not the FUT one
+
+    def test_30m_interval_maps_to_kites_own_30minute_string(self):
+        provider = _provider_with_token()
+        provider._instruments = {
+            "NSE": {r["tradingsymbol"]: r for r in NSE_INSTRUMENTS if r["instrument_type"] == "EQ"},
+            "BSE": {},
+        }
+        provider._instruments_loaded_at = provider._now()
+        provider._kite.historical_data = MagicMock(return_value=[])
+
+        provider._get_historical_df_sync("RELIANCE", "NSE", "30m", 30)
+
+        called_interval = provider._kite.historical_data.call_args[0][3]
+        assert called_interval == "30minute"
 
     def test_an_unmapped_symbol_returns_none(self):
         provider = _provider_with_token()

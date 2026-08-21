@@ -40,7 +40,7 @@ _TOKEN_TTL_SECONDS = 300
 _INSTRUMENTS_TTL_SECONDS = 86400
 
 _INTERVAL_MAP = {
-    "1m": "minute", "5m": "5minute", "15m": "15minute", "1h": "60minute", "1d": "day",
+    "1m": "minute", "5m": "5minute", "15m": "15minute", "30m": "30minute", "1h": "60minute", "1d": "day",
 }
 
 # yfinance-style index tickers used elsewhere in this codebase (router.py's
@@ -137,6 +137,15 @@ class KiteProvider:
             prev_close = float(ohlc["close"])
             change = ltp - prev_close
             change_pct = (change / prev_close * 100) if prev_close else 0.0
+            # Top-of-book bid/ask -- Kite's quote() always includes 5 levels of
+            # market depth, we only surface the best price on each side. Absent
+            # for the yfinance fallback provider and for pre-market/no-liquidity
+            # symbols, so both sides are None rather than a guessed 0.
+            depth = data.get("depth") or {}
+            buy_levels = depth.get("buy") or []
+            sell_levels = depth.get("sell") or []
+            bid = float(buy_levels[0]["price"]) if buy_levels else None
+            ask = float(sell_levels[0]["price"]) if sell_levels else None
             return {
                 "symbol": symbol.upper(),
                 "exchange": exchange.upper(),
@@ -148,6 +157,9 @@ class KiteProvider:
                 "low": float(ohlc["low"]),
                 "prev_close": round(prev_close, 4),
                 "volume": data.get("volume"),
+                "bid": bid,
+                "ask": ask,
+                "spread": round(ask - bid, 4) if bid is not None and ask is not None else None,
             }
         except _VENDOR_ERRORS as e:
             logger.warning("Kite quote fetch failed for %s/%s: %s", symbol, exchange, e)
