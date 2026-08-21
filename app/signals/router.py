@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import logging
 from functools import lru_cache
+from typing import Literal
 
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.signals.backtest.evaluator import evaluate
+from app.signals.pine.sandbox import run_pine_script
 from app.signals.service import SignalService
 
 logger = logging.getLogger(__name__)
@@ -47,6 +49,20 @@ def get_service() -> SignalService:
     test.
     """
     return SignalService()
+
+
+class PineRunBody(BaseModel):
+    source: str
+    bars: list[dict]
+    mode: Literal["indicator", "strategy"] = "indicator"
+
+
+@router.post("/pine/run")
+async def pine_run(body: PineRunBody):
+    """Run Pine source against the sandboxed PineTS runtime (app/pine_sandbox/)
+    and return its plot data or a structured error. ai-trader-api's /api/pine/run
+    proxies here -- this is the only place Pine actually executes."""
+    return await run_pine_script(body.source, body.bars, mode=body.mode)
 
 
 @router.post("/generate/{symbol}")
