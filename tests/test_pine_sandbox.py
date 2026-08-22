@@ -17,6 +17,25 @@ async def test_run_pine_script_returns_plot_data():
 
 
 @pytest.mark.asyncio
+async def test_run_pine_script_reuses_the_same_persistent_process_across_calls():
+    # The actual point of this design: no fresh Node process (and its V8 +
+    # pinets startup cost) per request.
+    await run_pine_script('//@version=5\nindicator("t")\nplot(ta.sma(close, 5), "SMA5")', BARS)
+    pid1 = sandbox_module._process.pid
+    await run_pine_script('//@version=5\nindicator("t")\nplot(ta.ema(close, 5), "EMA5")', BARS)
+    pid2 = sandbox_module._process.pid
+    assert pid1 == pid2
+
+
+@pytest.mark.asyncio
+async def test_shutdown_kills_the_persistent_process():
+    await run_pine_script('//@version=5\nindicator("t")\nplot(ta.sma(close, 5), "SMA5")', BARS)
+    assert sandbox_module._process is not None
+    await sandbox_module.shutdown()
+    assert sandbox_module._process is None
+
+
+@pytest.mark.asyncio
 async def test_run_pine_script_reports_a_timeout_as_a_structured_error_not_a_hang():
     source = "//@version=5\nindicator(\"t\")\nvar x = 0\nwhile true\n    x := x + 1"
     result = await run_pine_script(source, BARS, timeout_s=0.5)

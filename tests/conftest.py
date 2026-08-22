@@ -11,6 +11,21 @@ def settings():
     return get_settings()
 
 
+@pytest.fixture(autouse=True)
+async def _shutdown_pine_sandbox():
+    """The Pine sandbox (app/signals/pine/sandbox.py) is a persistent
+    process bound to the event loop that spawned it -- left running past
+    the end of a test, it would get reused by a LATER test under a
+    DIFFERENT loop (pytest-asyncio hands each test function its own).
+    sandbox.py defends against that case, but the abandoned transport
+    still triggers a harmless, noisy "Event loop is closed" warning at GC
+    time. A no-op for the vast majority of tests that never touch the
+    sandbox -- shutdown() returns immediately when nothing was started."""
+    yield
+    from app.signals.pine import sandbox
+    await sandbox.shutdown()
+
+
 def make_bars(rows: list[tuple[float, float, float, float]], start: str = "2026-01-01 09:15",
               freq: str = "15min", volume: float = 1000.0) -> pd.DataFrame:
     """Build an OHLCV frame from (open, high, low, close) tuples."""

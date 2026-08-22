@@ -29,6 +29,7 @@ from app.market.live_ticks import LiveTicks
 from app.market.providers.registry import market_data_router
 from app.market.router import router as market_router
 from app.market.service import get_quote
+from app.signals.pine import sandbox as pine_sandbox
 from app.signals.router import router as signals_router
 
 logger = logging.getLogger(__name__)
@@ -189,6 +190,10 @@ async def lifespan(app: FastAPI):
             kite_ticker.close()
         await redis_client.aclose()
         executor.shutdown(wait=False, cancel_futures=True)
+        # The pine sandbox is now a persistent process (see sandbox.py) --
+        # unlike the old one-shot subprocess, it doesn't exit on its own
+        # and would otherwise outlive this container as an orphan.
+        await pine_sandbox.shutdown()
 
 
 app = FastAPI(title="AI Trader Signals Service", version="0.1.0", lifespan=lifespan)
