@@ -17,13 +17,7 @@ _SANDBOX_DIR = Path(__file__).resolve().parents[2] / "pine_sandbox"
 _RUN_SCRIPT = _SANDBOX_DIR / "run_pine.mjs"
 
 
-async def run_pine_script(
-    source: str,
-    bars: list[dict[str, Any]],
-    mode: Literal["indicator", "strategy"] = "indicator",
-    timeout_s: float = 5.0,
-) -> dict[str, Any]:
-    payload = json.dumps({"source": source, "bars": bars, "mode": mode, "timeoutMs": int(timeout_s * 1000)})
+async def _run_once(payload: str, timeout_s: float) -> dict[str, Any]:
     proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -49,3 +43,23 @@ async def run_pine_script(
         return {"ok": False, "plots": None, "strategy": None, "error": "sandbox process failed"}
 
     return json.loads(stdout.decode())
+
+
+async def run_pine_script(
+    source: str,
+    bars: list[dict[str, Any]],
+    mode: Literal["indicator", "strategy"] = "indicator",
+    timeout_s: float = 5.0,
+) -> dict[str, Any]:
+    payload = json.dumps({"source": source, "bars": bars, "mode": mode, "timeoutMs": int(timeout_s * 1000)})
+    result = await _run_once(payload, timeout_s)
+    if result.get("error") == "sandbox unavailable":
+        # Observed live: an asyncio subprocess-pipe race closes stdin before
+        # the payload write finishes, unrelated to the Pine script itself --
+        # the exact same source+bars succeeds on retry, or run directly
+        # outside asyncio. One retry costs a few seconds and clears most of
+        # these, against a failure the frontend previously had no way to
+        # recover from (an indicator that silently never rendered).
+        logger.info("retrying pine sandbox run after a transient subprocess failure")
+        result = await _run_once(payload, timeout_s)
+    return result
