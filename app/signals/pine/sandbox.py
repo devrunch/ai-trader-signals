@@ -37,6 +37,17 @@ _SERVER_SCRIPT = _SANDBOX_DIR / "run_pine_server.mjs"
 # memory-pressure concern that motivated this design in the first place.
 _SANDBOX_SEMAPHORE = asyncio.Semaphore(1)
 
+# asyncio's StreamReader defaults to a 64KB line-length limit. A response
+# is written as one JSON line -- 1800+ bars across a couple of plots
+# routinely clears that, and readline() raises ValueError with the
+# oversized data still sitting unread in the buffer, which then re-raises
+# on every subsequent readline() until the process is killed. Found live:
+# one large response wedged the shared server for every request after it,
+# a strictly worse failure than the per-request subprocess it replaced.
+# 16MB matches the same headroom already given to Express's body limit
+# for this exact class of payload (ai-trader-api's bootstrap.ts).
+_STREAM_LIMIT = 16 * 1024 * 1024
+
 _process: asyncio.subprocess.Process | None = None
 # asyncio.subprocess.Process is bound to the loop that created it -- a real
 # server has exactly one loop for its whole process lifetime, but this is
@@ -81,7 +92,7 @@ async def _ensure_process() -> asyncio.subprocess.Process:
     _process = await asyncio.create_subprocess_exec(
         "node", str(_SERVER_SCRIPT),
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        cwd=str(_SANDBOX_DIR),
+        cwd=str(_SANDBOX_DIR), limit=_STREAM_LIMIT,
     )
     _process_loop = current_loop
     asyncio.create_task(_drain_stderr(_process))
@@ -116,13 +127,15 @@ async def _run_once(payload: str, timeout_s: float) -> dict[str, Any]:
             if not line:
                 raise RuntimeError("sandbox process closed its output")
             return json.loads(line.decode())
-        except (asyncio.TimeoutError, RuntimeError, ConnectionResetError, BrokenPipeError) as e:
+        except (asyncio.TimeoutError, RuntimeError, ConnectionResetError, BrokenPipeError, ValueError) as e:
             # Any anomaly here leaves the shared stdin/stdout stream in an
-            # indeterminate state -- e.g. a half-written request, or a
-            # response line still to come from a request we gave up on --
-            # never try to reuse it. The next call pays a fresh process's
-            # startup cost once; that's cheaper than serving corrupted
-            # line-framing to every request after this one.
+            # indeterminate state -- e.g. a half-written request, a
+            # response line still to come from a request we gave up on, or
+            # (ValueError) a line that overran the stream's length limit
+            # with the overflow still sitting unread in the buffer -- never
+            # try to reuse it, or every request after this one fails the
+            # same way against a permanently wedged process. The next call
+            # pays a fresh process's startup cost once instead.
             logger.warning("pine sandbox did not respond: %s", e)
             await _kill_process()
             return {"ok": False, "plots": None, "strategy": None, "error": "sandbox unavailable"}

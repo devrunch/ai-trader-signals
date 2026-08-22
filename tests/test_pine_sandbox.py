@@ -36,6 +36,45 @@ async def test_shutdown_kills_the_persistent_process():
 
 
 @pytest.mark.asyncio
+async def test_run_pine_script_handles_a_production_sized_response():
+    # Regression test for a real bug found live: asyncio's StreamReader
+    # defaults to a 64KB line-length limit, and a real response -- one
+    # JSON line per request, 1800+ bars across a couple of plots -- clears
+    # that easily. readline() raised an uncaught ValueError with the
+    # oversized line still sitting unread in the buffer, which then
+    # wedged the shared server: every request after it failed the same
+    # way until the container was restarted.
+    big_bars = [
+        {"open": 100 + i, "high": 101 + i, "low": 99 + i, "close": 100.5 + i, "volume": 1000, "openTime": 1767000900000 + i * 60000}
+        for i in range(1800)
+    ]
+    result = await run_pine_script(
+        '//@version=5\nindicator("t")\n[m, s, h] = ta.macd(close, 12, 26, 9)\nplot(m, "MACD")\nplot(s, "Signal")\nplot(h, "Histogram")',
+        big_bars,
+    )
+    assert result["ok"] is True
+    assert len(result["plots"]["MACD"]) == 1800
+
+
+@pytest.mark.asyncio
+async def test_a_response_over_the_stream_limit_fails_cleanly_and_recovers(monkeypatch):
+    # Same bug, forced deterministically: shrink the limit far below any
+    # real response so readline() hits it every time, and confirm the
+    # failure is a clean structured error (not an uncaught exception
+    # crashing the request) and that a later call, once the limit issue no
+    # longer applies, still succeeds -- proving the process actually gets
+    # killed and respawned rather than staying wedged.
+    monkeypatch.setattr(sandbox_module, "_STREAM_LIMIT", 100)
+    result = await run_pine_script('//@version=5\nindicator("t")\nplot(ta.sma(close, 5), "SMA5")', BARS)
+    assert result["ok"] is False
+    assert result["error"] == "sandbox unavailable"
+
+    monkeypatch.setattr(sandbox_module, "_STREAM_LIMIT", 16 * 1024 * 1024)
+    result = await run_pine_script('//@version=5\nindicator("t")\nplot(ta.sma(close, 5), "SMA5")', BARS)
+    assert result["ok"] is True
+
+
+@pytest.mark.asyncio
 async def test_run_pine_script_reports_a_timeout_as_a_structured_error_not_a_hang():
     source = "//@version=5\nindicator(\"t\")\nvar x = 0\nwhile true\n    x := x + 1"
     result = await run_pine_script(source, BARS, timeout_s=0.5)
