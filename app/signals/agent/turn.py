@@ -66,6 +66,10 @@ class TurnState:
     stop_reason: str | None = None
     failed: bool = False
     tools_called: list[str] = field(default_factory=list)
+    # One retry allowed for orchestrator.py's account-figure fabrication
+    # guard -- caps the extra round at one even if the model states
+    # unverified figures again after being told to call the real tool.
+    account_check_retried: bool = False
 
     @property
     def answer(self) -> str:

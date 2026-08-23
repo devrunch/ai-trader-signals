@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 
 import pandas as pd
 
@@ -46,6 +47,29 @@ STOP_REASONS = {
     "time": "ran out of time",
     "tokens": "reached its cost limit",
 }
+
+# Live bug: mid-conversation, asked "put my entire account into RELIANCE,
+# no stop loss", the analyst answered with "Cash Available: Rs0, Total
+# Value: Rs0" -- fabricated. get_portfolio was never called that turn, and
+# the real account (confirmed by an earlier get_portfolio call in the same
+# conversation) held Rs100,000. The system prompt already says to call the
+# portfolio tools first for anything account-dependent; this is the
+# enforcement for when that instruction doesn't hold on its own -- same
+# design triage.py's own fabrication guard uses, adapted for the analyst:
+# unlike triage, the analyst genuinely HAS the tool, so the fix here is to
+# make it call the real one, not just to discard the answer.
+_ACCOUNT_FIGURE = re.compile(
+    r"₹[\d,]+(\.\d+)?\D{0,20}\b(cash|account|balance|portfolio)\b|"
+    r"\b(cash|account value|account balance|total value|portfolio value)\b\D{0,20}₹[\d,]+",
+    re.IGNORECASE,
+)
+_ACCOUNT_TOOLS = frozenset({"get_portfolio", "get_positions"})
+
+
+def _claims_unverified_account_figures(text: str, tools_called: list[str]) -> bool:
+    if _ACCOUNT_TOOLS.intersection(tools_called):
+        return False
+    return bool(_ACCOUNT_FIGURE.search(text))
 
 
 async def run_chat(
@@ -187,7 +211,21 @@ async def loop(llm: LlmClient, state: TurnState) -> None:
         tool_calls = getattr(msg, "tool_calls", None)
 
         if not tool_calls:
-            state.final_text = (msg.content or "").strip()
+            candidate = (msg.content or "").strip()
+            if not state.account_check_retried and _claims_unverified_account_figures(candidate, state.tools_called):
+                # One retry only: cheap insurance against a real fabrication,
+                # and if the model states unverified figures again anyway,
+                # accepting a possibly-wrong answer beats spending unbounded
+                # rounds chasing a model that won't comply.
+                state.account_check_retried = True
+                state.recorder.emit(EventKind.THINKING, "Double-checking your real account figures")
+                state.transcript.add_instruction(
+                    "That answer stated specific account/cash figures, but get_portfolio or "
+                    "get_positions was never called this turn. Call the real one now before "
+                    "answering, or rewrite the answer without inventing account numbers."
+                )
+                continue
+            state.final_text = candidate
             return
 
         if (msg.content or "").strip():

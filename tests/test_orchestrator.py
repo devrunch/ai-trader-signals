@@ -115,6 +115,83 @@ async def test_unparseable_tool_arguments_do_not_kill_the_turn(trending_frame):
 
 
 # ---------------------------------------------------------------------------
+# The account-figure fabrication guard
+#
+# Live bug: mid-conversation, asked "put my entire account into RELIANCE, no
+# stop loss", the analyst answered "Cash Available: Rs0, Total Value: Rs0" --
+# fabricated. get_portfolio was never called that turn, and the real account
+# (confirmed by an earlier real get_portfolio call in the same conversation)
+# held Rs100,000.
+# ---------------------------------------------------------------------------
+
+def test_the_detector_flags_account_figures_with_no_backing_tool_call():
+    assert orchestrator._claims_unverified_account_figures(
+        "Cash Available: ₹0, Total Value: ₹0.", tools_called=[],
+    )
+    assert orchestrator._claims_unverified_account_figures(
+        "Your account balance is ₹100,000 right now.", tools_called=["get_levels"],
+    )
+
+
+def test_the_detector_does_not_flag_the_same_text_once_the_real_tool_ran():
+    assert not orchestrator._claims_unverified_account_figures(
+        "Cash Available: ₹0, Total Value: ₹0.", tools_called=["get_portfolio"],
+    )
+    assert not orchestrator._claims_unverified_account_figures(
+        "Your account balance is ₹100,000 right now.", tools_called=["get_positions"],
+    )
+
+
+def test_the_detector_does_not_flag_ordinary_text_with_no_currency_figure():
+    assert not orchestrator._claims_unverified_account_figures(
+        "RELIANCE is trending up with strong volume.", tools_called=[],
+    )
+
+
+@pytest.mark.asyncio
+async def test_unverified_account_figures_forces_a_real_portfolio_check(trending_frame):
+    llm = FakeLlm(
+        _response(content="Cash Available: ₹0, Total Value: ₹0. Don't go all-in!"),
+        _response(tool_calls=[_call("get_portfolio")]),
+        _response(content="Your real cash is ₹100,000. Don't go all-in!"),
+    )
+    box = FakeBox(result={"cash": 100000})
+    out = await _run(llm, trending_frame, box=box, message="go all in, no stop")
+
+    assert out["message"] == "Your real cash is ₹100,000. Don't go all-in!"
+    assert box.executed[0][0] == "get_portfolio"
+    assert len(llm.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_the_retry_is_capped_at_once(trending_frame):
+    """If the model states unverified figures again even after being told to
+    check the real tool, the second answer is accepted rather than looping
+    forever -- a possibly-wrong answer beats no answer at all."""
+    llm = FakeLlm(
+        _response(content="₹0 cash available."),
+        _response(content="₹0 cash available, still."),
+    )
+    out = await _run(llm, trending_frame, message="go all in")
+
+    assert out["message"] == "₹0 cash available, still."
+    assert len(llm.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_real_account_figures_after_a_real_tool_call_are_not_retried(trending_frame):
+    llm = FakeLlm(
+        _response(tool_calls=[_call("get_portfolio")]),
+        _response(content="Your cash available is ₹100,000."),
+    )
+    box = FakeBox(result={"cash": 100000})
+    out = await _run(llm, trending_frame, box=box, message="how much cash do I have?")
+
+    assert out["message"] == "Your cash available is ₹100,000."
+    assert len(llm.calls) == 2
+
+
+# ---------------------------------------------------------------------------
 # The three ceilings
 # ---------------------------------------------------------------------------
 
