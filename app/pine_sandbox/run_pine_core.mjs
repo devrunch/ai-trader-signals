@@ -9,7 +9,7 @@ const WORKER_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "wor
  *  Shared by run_pine.mjs (one-shot CLI) and run_pine_server.mjs (the
  *  persistent server) so a single execution's isolation guarantees are
  *  defined once, not duplicated between the two entry points. */
-export async function runPine({ source, bars, mode, timeoutMs = 5000 }) {
+export async function runPine({ source, bars, mode, timeoutMs = 5000, tickerId, timeframe, symbolInfo }) {
   return new Promise((resolve) => {
     const worker = new Worker(WORKER_PATH, {
       resourceLimits: { maxOldGenerationSizeMb: 256, maxYoungGenerationSizeMb: 64 },
@@ -21,6 +21,6 @@ export async function runPine({ source, bars, mode, timeoutMs = 5000 }) {
 
     worker.once("message", (result) => { clearTimeout(timer); finish(result); });
     worker.once("error", (err) => { clearTimeout(timer); finish({ ok: false, plots: null, strategy: null, error: String(err?.message ?? err) }); });
-    worker.postMessage({ source, bars, mode });
+    worker.postMessage({ source, bars, mode, tickerId, timeframe, symbolInfo });
   });
 }

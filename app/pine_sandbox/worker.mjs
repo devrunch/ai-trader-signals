@@ -1,10 +1,33 @@
 import { parentPort } from "node:worker_threads";
 import { PineTS } from "pinets";
+import { BarsProvider } from "./bars-provider.mjs";
 
-parentPort.on("message", async ({ source, bars, mode }) => {
+// Real TradingView requires `//@version=X` as a script's first line, but a
+// script pasted/copied from elsewhere (a forum post, a script body copied
+// without its header) routinely arrives without one. Confirmed live:
+// PineTS's own parser mis-locates a totally unrelated later token
+// (`Unexpected token` several lines in, at a column that doesn't
+// correspond to anything in the real source) when the pragma is missing,
+// rather than failing clearly at the top -- a confusing failure for
+// something with an easy, unambiguous default. Defaulting to the latest
+// version here is what lets a script "just work" the way a user expects,
+// per the actual product goal: run whatever Pine a user pastes in.
+const VERSION_PRAGMA = /^\s*\/\/\s*@version\s*=/;
+function ensureVersionPragma(source) {
+  return VERSION_PRAGMA.test(source) ? source : `//@version=6\n${source}`;
+}
+
+parentPort.on("message", async ({ source, bars, mode, tickerId, timeframe, symbolInfo }) => {
   try {
-    const pine = new PineTS(bars);
-    const ctx = await pine.run(source);
+    const runnableSource = ensureVersionPragma(source);
+    // Raw-array `source` is kept as the fallback for callers that don't
+    // pass a tickerId (backward compatible) -- BarsProvider only changes
+    // behavior for scripts that actually read syminfo/timeframe, verified
+    // byte-identical plot output otherwise.
+    const pine = tickerId
+      ? new PineTS(new BarsProvider(bars, symbolInfo), tickerId, timeframe || "1")
+      : new PineTS(bars);
+    const ctx = await pine.run(runnableSource);
     if (mode === "strategy") {
       parentPort.postMessage({
         ok: true,

@@ -55,14 +55,26 @@ class PineRunBody(BaseModel):
     source: str
     bars: list[dict]
     mode: Literal["indicator", "strategy"] = "indicator"
+    symbol: str | None = None
+    exchange: str | None = None
+    interval: str | None = None
 
 
 @router.post("/pine/run")
 async def pine_run(body: PineRunBody):
     """Run Pine source against the sandboxed PineTS runtime (app/pine_sandbox/)
     and return its plot data or a structured error. ai-trader-api's /api/pine/run
-    proxies here -- this is the only place Pine actually executes."""
-    return await run_pine_script(body.source, body.bars, mode=body.mode)
+    proxies here -- this is the only place Pine actually executes.
+
+    symbol/exchange (when given) get wrapped as a real PineTS IProvider
+    instead of a raw bars array, so scripts that read syminfo.*/timeframo.*
+    resolve real values instead of leaving syminfo undefined."""
+    ticker_id = f"{body.exchange}:{body.symbol}" if body.symbol else None
+    symbol_info = {"symbol": body.symbol, "exchange": body.exchange} if body.symbol else None
+    return await run_pine_script(
+        body.source, body.bars, mode=body.mode,
+        ticker_id=ticker_id, timeframe=body.interval, symbol_info=symbol_info,
+    )
 
 
 @router.post("/generate/{symbol}")

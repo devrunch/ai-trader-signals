@@ -146,8 +146,19 @@ async def run_pine_script(
     bars: list[dict[str, Any]],
     mode: Literal["indicator", "strategy"] = "indicator",
     timeout_s: float = 5.0,
+    ticker_id: str | None = None,
+    timeframe: str | None = None,
+    symbol_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    payload = json.dumps({"source": source, "bars": bars, "mode": mode, "timeoutMs": int(timeout_s * 1000)})
+    payload = json.dumps({
+        "source": source,
+        "bars": bars,
+        "mode": mode,
+        "timeoutMs": int(timeout_s * 1000),
+        "tickerId": ticker_id,
+        "timeframe": timeframe,
+        "symbolInfo": symbol_info,
+    })
     result = await _run_once(payload, timeout_s)
     if result.get("error") == "sandbox unavailable":
         # A brief memory-pressure spike can still hit an in-flight request

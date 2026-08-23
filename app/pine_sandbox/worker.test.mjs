@@ -88,3 +88,37 @@ fill(p1, p2, color=color.new(color.blue, 85))`;
   // instead of a guess.
   assert.match(result.fills[0].colors.at(-1).color, /^#/);
 });
+
+test("a script missing the //@version= pragma still runs, instead of PineTS's parser mis-locating an unrelated later token", () => {
+  // Reproduces a real failure: a script pasted without its version header
+  // (common when copied from a forum post or retyped by hand) fails with
+  // "Unexpected token" at a line:col that doesn't correspond to anything
+  // in the actual source -- confirmed live against the real package. The
+  // fix is a default, not better error reporting: real TradingView Pine
+  // always requires this line, so filling it in is what makes an
+  // otherwise-valid script "just work".
+  const source = `indicator("t")\nvar float a = na\nvar float b = na\na := math.max(close, nz(a[1])) - nz(a[1] - b[1]) / 100\nplot(a, "a")`;
+  const result = run({ source, bars: BARS, mode: "indicator" });
+  assert.equal(result.ok, true, result.error);
+  assert.ok(Array.isArray(result.plots["a"]));
+});
+
+test("a script with its own //@version= pragma is left untouched, not double-prefixed", () => {
+  const result = run({ source: `//@version=5\nindicator("t")\nplot(ta.sma(close, 5), "SMA5")`, bars: BARS, mode: "indicator" });
+  assert.equal(result.ok, true, result.error);
+});
+
+test("syminfo.ticker and timeframe.multiplier resolve real values when tickerId/timeframe/symbolInfo are given", () => {
+  const source = `//@version=5
+indicator("t")
+plot(1, "x")
+plot(timeframe.multiplier, "tf")
+if barstate.islast
+    alert("BUY - " + syminfo.ticker, alert.freq_once_per_bar_close)`;
+  const result = run({
+    source, bars: BARS, mode: "indicator",
+    tickerId: "NSE:RELIANCE", timeframe: "5", symbolInfo: { symbol: "RELIANCE", exchange: "NSE" },
+  });
+  assert.equal(result.ok, true, result.error);
+  assert.equal(result.plots["tf"].at(-1).value, 5);
+});
