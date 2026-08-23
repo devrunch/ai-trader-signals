@@ -26,10 +26,6 @@ SERIES_LINE = "#e0ab4a"
 # "plot everything ever fetched".
 MAX_SERIES_POINTS = 180
 
-# KLineChart's built-in indicator names. Anything outside this set would be
-# accepted here and then silently fail to render.
-CHART_INDICATORS = {"EMA", "MA", "SMA", "BOLL", "SAR", "VOL", "MACD", "RSI", "KDJ", "BBI"}
-
 
 async def draw_on_chart(ctx: ToolContext, args: dict) -> Any:
     what = args.get("what")
@@ -74,18 +70,6 @@ _DRAWINGS = {
     "support_resistance": _draw_levels,
     "fibonacci": _draw_fibonacci,
 }
-
-
-async def add_chart_indicator(ctx: ToolContext, args: dict) -> Any:
-    add = [str(x).upper() for x in (args.get("add") or []) if str(x).upper() in CHART_INDICATORS]
-    remove = [str(x).upper() for x in (args.get("remove") or []) if str(x).upper() in CHART_INDICATORS]
-    if not add and not remove:
-        return {"error": f"No valid chart indicators given. Valid: {sorted(CHART_INDICATORS)}"}
-
-    current = ctx.results.setdefault("chart_indicators", {"add": [], "remove": []})
-    current["add"] = sorted({*current["add"], *add})
-    current["remove"] = sorted({*current["remove"], *remove})
-    return {"chart_updated": True, "added": add, "removed": remove}
 
 
 async def plot_series(ctx: ToolContext, args: dict) -> Any:
@@ -147,6 +131,5 @@ async def plot_series(ctx: ToolContext, args: dict) -> Any:
 
 TOOLS: dict[str, Handler] = {
     "draw_on_chart": draw_on_chart,
-    "add_chart_indicator": add_chart_indicator,
     "plot_series": plot_series,
 }

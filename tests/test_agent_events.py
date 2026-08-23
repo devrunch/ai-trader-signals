@@ -158,7 +158,7 @@ class _FakeService:
     """Stands in for SignalService: emits a couple of events, then answers."""
     market = None
 
-    async def chat(self, symbol, exchange, message, history=None, user_id=None, recorder=None):
+    async def chat(self, symbol, exchange, message, history=None, user_id=None, recorder=None, chart_state=None):
         if recorder is not None:
             recorder.emit(EventKind.TURN_STARTED, f"Analysing {symbol}")
             recorder.emit(EventKind.TOOL_STARTED, "Reading price history", tool="get_candles")
@@ -212,7 +212,7 @@ def test_a_quiet_turn_still_sends_something_so_proxies_do_not_close_it():
     from app.signals import router as router_mod
 
     class Slow:
-        async def chat(self, symbol, exchange, message, history=None, user_id=None, recorder=None):
+        async def chat(self, symbol, exchange, message, history=None, user_id=None, recorder=None, chart_state=None):
             await asyncio.sleep(0.05)
             return {"message": "done", "drawings": [], "results": {}, "events": []}
 
@@ -235,7 +235,7 @@ def test_a_slow_reader_cannot_make_the_turn_hold_every_event_in_memory():
     from app.signals import router as router_mod
 
     class Chatty:
-        async def chat(self, symbol, exchange, message, history=None, user_id=None, recorder=None):
+        async def chat(self, symbol, exchange, message, history=None, user_id=None, recorder=None, chart_state=None):
             for i in range(50):
                 recorder.emit(EventKind.THINKING, f"step {i}")
             return {"message": "done", "drawings": [], "results": {},

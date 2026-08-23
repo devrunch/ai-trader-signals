@@ -73,11 +73,15 @@ class SignalService:
     async def chat(
         self, symbol: str, exchange: str, message: str,
         history: list[dict] | None = None, user_id: str | None = None,
-        recorder=None, store=None,
+        recorder=None, store=None, chart_state: dict | None = None,
     ) -> dict:
         """`recorder` is optional: pass a TurnRecorder wired to a live emitter to
         stream progress (see POST /signals/chat/stream). Without one the turn
-        still records its events, into a recorder nobody is listening to."""
+        still records its events, into a recorder nobody is listening to.
+
+        `chart_state` is what the browser last reported attached to the
+        chart (see ai-trader-api's SignalsGateway) -- lets the agent's
+        chart_indicators tools see and change what's really there."""
         from app.signals.agent.orchestrator import run_chat
         from app.signals.agent.turn import new_turn_id
 
@@ -92,7 +96,7 @@ class SignalService:
         return await run_chat(
             self.llm, symbol, exchange, message, df,
             history=history, user_id=user_id, settings=self.settings,
-            recorder=recorder, store=store,
+            recorder=recorder, store=store, chart_state=chart_state,
         )
 
     # ------------------------------------------------------------------

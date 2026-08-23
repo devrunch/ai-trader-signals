@@ -103,6 +103,14 @@ class ChatBody(BaseModel):
     message: str = Field(max_length=4000)
     history: list[dict] | None = Field(default=None, max_length=20)
     user_id: str | None = None
+    # What ai-trader-api's SignalsGateway last heard from the browser over
+    # the chart_state socket event -- {interval, indicators: [...]}. Never
+    # sent by the frontend directly (chat POSTs never carried chart state
+    # before this); ai-trader-api's ChatStreamController/SignalsController
+    # look it up server-side and attach it here. Absent for a client too old
+    # to emit chart_state -- the chart_indicators tools treat that as
+    # "nothing attached", not an error.
+    chart_state: dict | None = None
 
 
 @router.post("/chat")
@@ -111,7 +119,8 @@ async def chat(body: ChatBody, service: SignalService = Depends(get_service)):
     the user's portfolio, risk sizing, backtests, chart drawing) before answering."""
     try:
         return await service.chat(
-            body.symbol.upper(), body.exchange.upper(), body.message, body.history, body.user_id
+            body.symbol.upper(), body.exchange.upper(), body.message, body.history, body.user_id,
+            chart_state=body.chart_state,
         )
     except Exception as exc:  # noqa: BLE001 - reported to the client, then logged
         logger.exception("Chat failed for %s", body.symbol)
@@ -185,6 +194,7 @@ async def chat_stream(body: ChatBody, service: SignalService = Depends(get_servi
             result = await service.chat(
                 body.symbol.upper(), body.exchange.upper(), body.message,
                 body.history, body.user_id, recorder=recorder,
+                chart_state=body.chart_state,
             )
             await queue.put({"kind": "result", "at_ms": recorder.elapsed_ms(), "detail": result})
         except Exception as exc:  # noqa: BLE001 - reported to the client, then logged

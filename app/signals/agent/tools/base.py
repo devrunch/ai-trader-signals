@@ -44,6 +44,8 @@ class ToolContext:
         settings=None,
         llm=None,
         budget=None,
+        chart_indicators: list[dict] | None = None,
+        chart_interval: str | None = None,
     ):
         self.symbol = symbol.upper()
         self.exchange = exchange.upper()
@@ -54,6 +56,16 @@ class ToolContext:
         self.market = market            # provider router
         self.llm = llm                  # the turn's real LlmClient — for tools that write text/formulas themselves
         self.budget = budget            # the turn's Budget — record() any ctx.llm call into it, same as orchestrator.py does
+        # What is actually attached to the user's chart RIGHT NOW, pushed from
+        # the browser over the chart_state socket event (see
+        # ai-trader-api/src/signals/signals.gateway.ts) and forwarded through
+        # ChatBody.chart_state. Each entry mirrors the frontend's own
+        # AttachedIndicator shape: id/source/label/pane/params/style/visibility.
+        # Empty when the browser hasn't sent one yet (first load, or a client
+        # too old to emit it) — tools.chart_indicators.list_chart_indicators
+        # reports that honestly rather than pretending the chart is empty.
+        self.chart_indicators: list[dict] = chart_indicators or []
+        self.chart_interval = chart_interval
 
         # Written by tools, read by the orchestrator when the turn ends.
         self.drawings: list[dict] = []

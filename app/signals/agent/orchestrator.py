@@ -60,8 +60,9 @@ async def run_chat(
     settings=None,
     recorder: TurnRecorder | None = None,
     store: TurnStore | None = None,
+    chart_state: dict | None = None,
 ) -> dict:
-    state = prepare(llm, symbol, exchange, message, df, history, user_id, toolbox, settings, recorder)
+    state = prepare(llm, symbol, exchange, message, df, history, user_id, toolbox, settings, recorder, chart_state)
     try:
         # The front desk first. It holds no tool schemas, so a greeting costs a
         # few hundred tokens instead of the ~2,400 of schemas that the analyst
@@ -105,6 +106,7 @@ def prepare(
     toolbox: AgentToolbox | None = None,
     settings=None,
     recorder: TurnRecorder | None = None,
+    chart_state: dict | None = None,
 ) -> TurnState:
     settings = settings or get_settings()
     recorder = recorder or TurnRecorder()
@@ -113,9 +115,16 @@ def prepare(
     # exact same Budget the loop below is also recording into — not a second,
     # invisible one that never reaches the turn's usage total.
     budget = Budget.from_settings(settings)
+    # What the browser last reported over the chart_state socket event —
+    # real but possibly slightly stale (see chart_indicators.py's own note).
+    # Absent entirely for a client too old to emit one; the tools handle
+    # that as "nothing attached", not an error.
+    chart_state = chart_state or {}
     box = toolbox or AgentToolbox(symbol, exchange, df, user_id,
                                   settings=settings, recorder=recorder,
-                                  llm=llm, budget=budget)
+                                  llm=llm, budget=budget,
+                                  chart_indicators=chart_state.get("indicators"),
+                                  chart_interval=chart_state.get("interval"))
     last_price = round(float(df["close"].iloc[-1]), 2)
     turn_id = new_turn_id()
 

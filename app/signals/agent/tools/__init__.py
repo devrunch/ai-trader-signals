@@ -12,7 +12,7 @@ three places that mention it.
 """
 from __future__ import annotations
 
-from app.signals.agent.tools import account, chart, graph_agent, market, strategy
+from app.signals.agent.tools import account, chart, chart_indicators, graph_agent, market, strategy
 from app.signals.agent.tools.base import Handler, ToolContext
 
 GROUPS: dict[str, dict[str, Handler]] = {
@@ -20,6 +20,7 @@ GROUPS: dict[str, dict[str, Handler]] = {
     "account": account.TOOLS,
     "strategy": strategy.TOOLS,
     "chart": chart.TOOLS,
+    "chart_indicators": chart_indicators.TOOLS,
     "graph_agent": graph_agent.TOOLS,
 }
 

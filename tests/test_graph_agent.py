@@ -1,8 +1,13 @@
 """generate_custom_indicator now writes Pine, not diascript. _write_formula
 (the LLM call) is mocked throughout -- consistent with the rest of this
-suite's history -- but _check runs for real against the real sandbox
-(app/pine_sandbox/), so these tests prove the retry loop and the source-text
-gate actually work end to end, not just that the mocks were wired right.
+suite's history -- but check_pine_source runs for real against the real
+sandbox (app/pine_sandbox/), so these tests prove the retry loop and the
+source-text gate actually work end to end, not just that the mocks were
+wired right.
+
+FORBIDDEN_CALLS/FORBIDDEN_NAMESPACES/forbidden_call_feedback/synthetic_bars
+now live in pine_validation.py, shared with chart_indicators.py's
+edit_indicator_source -- both need the identical gate.
 """
 from __future__ import annotations
 
@@ -13,12 +18,12 @@ import pytest
 from app.config import get_settings
 from app.signals.agent.context import StaticTradingContext
 from app.signals.agent.toolbox import AgentToolbox
-from app.signals.agent.tools.graph_agent import (
+from app.signals.agent.tools.graph_agent import SYSTEM_PROMPT
+from app.signals.agent.tools.pine_validation import (
     FORBIDDEN_CALLS,
     FORBIDDEN_NAMESPACES,
-    SYSTEM_PROMPT,
-    _forbidden_call_feedback,
-    _synthetic_bars,
+    forbidden_call_feedback,
+    synthetic_bars,
 )
 
 
@@ -134,26 +139,39 @@ class TestForbiddenCallGate:
     own comment in graph_agent.py for why this needs to be real."""
 
     def test_clean_source_passes(self):
-        assert _forbidden_call_feedback(GOOD_SOURCE) is None
+        assert forbidden_call_feedback(GOOD_SOURCE) is None
 
     @pytest.mark.parametrize("call", FORBIDDEN_CALLS)
     def test_each_forbidden_call_is_rejected(self, call):
         source = f'//@version=5\nindicator("t")\n{call}close)'
-        feedback = _forbidden_call_feedback(source)
+        feedback = forbidden_call_feedback(source)
         assert feedback is not None
         assert call in feedback
 
     @pytest.mark.parametrize("ns", FORBIDDEN_NAMESPACES)
     def test_each_forbidden_namespace_is_rejected(self, ns):
         source = f'//@version=5\nindicator("t")\nx = {ns}foo'
-        feedback = _forbidden_call_feedback(source)
+        feedback = forbidden_call_feedback(source)
         assert feedback is not None
         assert ns in feedback
+
+    @pytest.mark.parametrize("source", [
+        'p1 = plot(close, "A")\np2 = plot(open, "B")\nfill(p1, p2, color=color.new(color.blue, 85))',
+        'plotshape(close > open, title="Up")',
+        'length = input.int(20, title="Length")\nplot(ta.sma(close, length), "SMA")',
+    ])
+    def test_now_allowed_constructs_pass(self, source):
+        """fill()/plotshape()/input.*() all render for real now (fill and
+        plotshape were built and verified earlier this session; input.*()
+        once the settings gear existed to consume it) -- must not be
+        rejected by the same gate that still blocks bgcolor()/plotchar()/
+        plotarrow()/strategy.*()/request.security()."""
+        assert forbidden_call_feedback(f'//@version=5\nindicator("t")\n{source}') is None
 
 
 class TestSyntheticBars:
     def test_produces_a_non_degenerate_deterministic_series(self):
-        bars = _synthetic_bars(80)
+        bars = synthetic_bars(80)
         assert len(bars) == 80
         closes = [b["close"] for b in bars]
         assert len(set(closes)) > 1  # not a flat run
@@ -164,7 +182,7 @@ class TestSyntheticBars:
 
         # Deterministic -- a fixed seed, not real randomness -- so a retry
         # against the same description reproduces the same synthetic check.
-        assert _synthetic_bars(80) == bars
+        assert synthetic_bars(80) == bars
 
 
 class TestSystemPromptContent:
@@ -177,8 +195,22 @@ class TestSystemPromptContent:
     def test_states_the_band_naming_convention(self):
         assert '"<Name> Upper"' in SYSTEM_PROMPT or "<Name> Upper" in SYSTEM_PROMPT
 
-    def test_forbids_the_calls_the_render_pipeline_cannot_show(self):
-        for call in ("fill(", "bgcolor(", "plotshape("):
+    def test_describes_fill_and_plotshape_as_supported(self):
+        """Both render for real now (built and verified this session) --
+        the prompt must say so, not still ban them."""
+        assert "fill(p1, p2, color)" in SYSTEM_PROMPT
+        assert "plotshape()" in SYSTEM_PROMPT
+        assert "fill(), bgcolor()" not in SYSTEM_PROMPT  # the old combined ban
+
+    def test_describes_input_as_supported(self):
+        """The settings gear (Inputs tab) is real now -- the prompt must
+        tell the model to use input.*() for tunable values, not still ban
+        it as needing a UI that doesn't exist."""
+        assert "input.int()" in SYSTEM_PROMPT or "input.*()" in SYSTEM_PROMPT
+        assert "settings panel" in SYSTEM_PROMPT or "gear" in SYSTEM_PROMPT
+
+    def test_still_forbids_the_calls_with_no_renderer(self):
+        for call in ("bgcolor(", "plotchar(", "plotarrow("):
             assert call in SYSTEM_PROMPT
 
     def test_forbids_strategy_and_request_security(self):
@@ -194,8 +226,8 @@ class TestPromptWorkedExamplesValidateForReal:
     session already applied to diascript's worked examples."""
 
     async def _run(self, source: str) -> dict:
-        from app.signals.agent.tools.graph_agent import run_pine_script
-        return await run_pine_script(source, _synthetic_bars(60), mode="indicator")
+        from app.signals.pine.sandbox import run_pine_script
+        return await run_pine_script(source, synthetic_bars(60), mode="indicator")
 
     async def test_ema_diff(self):
         result = await self._run('//@version=5\nindicator("EMA Diff", overlay=false)\nplot(ta.ema(close, 20) - ta.ema(close, 50), "EMA Diff")')

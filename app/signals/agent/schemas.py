@@ -122,14 +122,76 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
-            "name": "add_chart_indicator",
-            "description": "Add or remove indicator overlays on the user's chart (e.g. RSI, MACD, Bollinger, EMA). Use when the user asks to see something on the chart.",
+            "name": "list_chart_indicators",
+            "description": (
+                "See exactly what's attached to the user's chart right now -- id, label, pane, "
+                "full Pine source, and current settings (params/style/visibility) for each. "
+                "Call this before set_indicator_params, edit_indicator_source, or "
+                "remove_chart_indicator: you need the real id and, for an edit, the real current "
+                "source. Also the honest way to answer 'what's on my chart' or 'what am I looking "
+                "at' -- you have no other visibility into it."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_indicator_params",
+            "description": (
+                "Change one or more of an already-attached indicator's own input.*() values -- "
+                "e.g. a moving average's length, a toggle. Keyed by varId (the script's own "
+                "variable name, e.g. 'length'), not the display title shown in its settings "
+                "panel -- get the real varId from list_chart_indicators first. For a real logic "
+                "change (not a settings value), use edit_indicator_source instead."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "add": {"type": "array", "items": {"type": "string"}, "description": "Chart indicators to show: EMA, MA, BOLL, SAR, VOL, MACD, RSI, KDJ"},
-                    "remove": {"type": "array", "items": {"type": "string"}},
+                    "id": {"type": "string", "description": "The indicator's id, from list_chart_indicators"},
+                    "params": {
+                        "type": "object",
+                        "description": "varId -> new value, e.g. {\"length\": 50, \"showSignals\": false}",
+                    },
                 },
+                "required": ["id", "params"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_indicator_source",
+            "description": (
+                "Replace an already-attached indicator's entire Pine source -- for an actual "
+                "logic change the user asked for (e.g. 'make it use EMA instead of SMA', "
+                "'also plot the signal line'). Get the current source from "
+                "list_chart_indicators first and edit from there, not from memory. Validated "
+                "against the real sandbox before it reaches the chart; if it fails, the error "
+                "explains why. For only a settings value, use set_indicator_params instead -- "
+                "it's cheaper and can't introduce a typo into working code."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "The indicator's id, from list_chart_indicators"},
+                    "source": {"type": "string", "description": "The complete new Pine source, not a diff"},
+                },
+                "required": ["id", "source"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "remove_chart_indicator",
+            "description": "Detach an indicator from the user's chart by id. Use list_chart_indicators first to find the right one.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "The indicator's id, from list_chart_indicators"},
+                },
+                "required": ["id"],
             },
         },
     },
@@ -312,7 +374,7 @@ TOOL_SCHEMAS: list[dict] = [
                 "close, open, high, low, volume, rsi, ema, sma, atr, adx, cci, williams_r, mfi, roc, "
                 "macd, macd_hist, macd_signal, bb_upper, bb_mid, bb_lower, supertrend_dir, vwap, "
                 "volume_ratio, highest, lowest. "
-                "Use this for anything not covered by draw_on_chart or add_chart_indicator — e.g. "
+                "Use this for anything not covered by draw_on_chart or the built-in get_indicators list — e.g. "
                 "'the 5-bar highest high and lowest low' is two calls: series=highest length=5, "
                 "then series=lowest length=5. Values are computed server-side from real bars; you "
                 "only choose which series and what parameters. Quote last_value for the current "
@@ -345,12 +407,12 @@ TOOL_SCHEMAS: list[dict] = [
         "function": {
             "name": "generate_custom_indicator",
             "description": (
-                "Write and add a CUSTOM indicator to the chart from a plain-language "
+                "Write and add a brand-new CUSTOM indicator to the chart from a plain-language "
                 "description — e.g. 'the 20-EMA minus the 50-EMA' or 'RSI with a "
-                "21-period length'. Use this when the request doesn't match a built-in "
-                "indicator (add_chart_indicator) or a known series (plot_series). The "
-                "formula is validated before it reaches the chart; if validation fails "
-                "twice, this returns an error instead of a broken indicator."
+                "21-period length'. Use this when the request doesn't match a known series "
+                "(plot_series) or an existing attached indicator that just needs editing "
+                "(edit_indicator_source). The formula is validated before it reaches the chart; "
+                "if validation fails twice, this returns an error instead of a broken indicator."
             ),
             "parameters": {
                 "type": "object",

@@ -15,16 +15,18 @@ def test_chat_system_prompt_forbids_describing_chart_changes_beyond_the_tool_res
     assert "Never invent additional visual detail" in prompt
 
 
-def test_chat_system_prompt_forbids_contradicting_a_user_who_says_something_isnt_showing():
+def test_chat_system_prompt_points_to_list_chart_indicators_and_still_forbids_overclaiming():
     """Live bug: the user said "its not there" about a Gaussian filter
     indicator, and the analyst replied "I can see the Gaussian filter
-    indicator is now displayed... it's working correctly" -- a claim about
-    the user's own browser it has no channel to verify. The prompt must
-    say plainly that it cannot see the user's screen and must not insist
-    otherwise."""
+    indicator is now displayed... it's working correctly" -- at the time, a
+    claim about the user's own browser it had no channel to verify at all.
+    The agent now has real (if partial) visibility via list_chart_indicators
+    -- the prompt must point to it, but still must not claim more than that
+    tool actually covers (manual drawings and exact on-screen rendering
+    stay genuinely unverifiable)."""
     prompt = chat_system_prompt("RELIANCE", "NSE", 1314.1)
-    assert "no visibility into what is currently rendering in the user's browser" in prompt
-    assert "never insist it is there or working" in prompt
+    assert "list_chart_indicators" in prompt
+    assert "not manual drawings" in prompt
 
 
 def test_chat_system_prompt_requires_trying_generate_custom_indicator_before_declining():

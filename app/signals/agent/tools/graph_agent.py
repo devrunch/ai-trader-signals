@@ -1,11 +1,11 @@
 """
 Custom-indicator authoring: the model writes Pine Script, a source-text gate
-rejects calls the render pipeline can't show (fill/bgcolor/plotshape/...),
-then the real sandbox (app/pine_sandbox/) actually runs it against synthetic
-bars through the real PineTS engine — a script can be syntactically valid
-Pine and still crash on real data or produce no plot() output at all, and
-only running it catches that. One retry with the real feedback if either
-gate fails. Rendering happens client-side, via pine-render.ts's
+rejects calls the render pipeline can't show (see pine_validation.py), then
+the real sandbox (app/pine_sandbox/) actually runs it against synthetic bars
+through the real PineTS engine — a script can be syntactically valid Pine
+and still crash on real data or produce no plot() output at all, and only
+running it catches that. One retry with the real feedback if either gate
+fails. Rendering happens client-side, via pine-render.ts's
 attachPinePlotsToPane, once LightweightChartsAdapter.attachPineIndicator
 calls the same /api/pine/run endpoint this validation already exercises.
 """
@@ -14,28 +14,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import random
 import re
 from typing import Any
 
 from app.signals.agent.tools.base import Handler, ToolContext
-from app.signals.pine.sandbox import run_pine_script
+from app.signals.agent.tools.pine_validation import check_pine_source, synthetic_bars
 
 logger = logging.getLogger(__name__)
-
-# Valid Pine, but the render pipeline (pine-render.ts) has no support for
-# any of these yet -- each would either draw nothing or draw a meaningless
-# line from whatever generic key it lands in ctx.plots under (confirmed:
-# bgcolor()/plotshape() both produce a plot named literally "plot", fill()
-# produces one named "fill" -- neither is a real plot() title the render
-# pipeline can meaningfully show). A source-text gate, not just a prompt
-# rule, matching how the old diascript flow's RENDERABLE_OUTPUT_TYPES was a
-# real code-level check, not just something the prompt asked nicely for.
-FORBIDDEN_CALLS = ("fill(", "bgcolor(", "plotshape(", "plotchar(", "plotarrow(")
-# strategy.*() is a different, separate capability (this tool authors
-# indicators only) and request.security()/input.*() need data or a UI this
-# tool doesn't wire up -- same reasoning, checked the same way.
-FORBIDDEN_NAMESPACES = ("strategy.", "request.security(", "input.")
 
 _CODE_FENCE_RE = re.compile(r"^```[^\n]*\n?(.*?)\n?```$", re.DOTALL)
 _PANE_LINE_RE = re.compile(r"^PANE:\s*(main|sub)\s*$", re.IGNORECASE | re.MULTILINE)
@@ -62,20 +47,24 @@ between), name the two plot() titles "<Name> Upper" and "<Name> Lower" \
 exactly — that naming is what the render pipeline uses to draw a filled \
 band instead of two independent lines. This is the ONLY way to get a \
 band/channel look; there is no other mechanism today.
-- ONLY plot() is renderable right now. Do NOT use fill(), bgcolor(), \
-plotshape(), plotchar(), or plotarrow() — they are valid Pine and will run \
-without error, but the chart-rendering pipeline has no support for them \
-yet (see pine-render.ts's own documented scope) and their visual effect \
-will simply not appear. A script that only uses these produces no visible \
-output at all, which is a worse failure than an ordinary error because \
-nothing looks wrong until a person actually looks at the chart. If a \
-request specifically wants a filled/shaded region, band naming (above) is \
-the honest way to approximate it — a band is not identical to a translucent \
-fill, but it is real and it renders.
+- plot() is renderable, and so are fill() and plotshape() — both render for \
+real now. fill(p1, p2, color) shades the region between two plot()s you've \
+already made (reference them by the variable each plot() call returns, e.g. \
+`p1 = plot(...)`, then `fill(p1, p2, color=...)`). plotshape() marks bars \
+matching a boolean condition (e.g. a crossover) with a marker; give it a \
+clear title like "Buy" or "Sell" so it reads correctly on the chart. Do NOT \
+use bgcolor(), plotchar(), or plotarrow() — those still have no renderer.
+- input.*() is renderable now too — the chart has a real settings panel \
+(a gear icon on the indicator's legend row) built from exactly the \
+input.*() calls in your script, letting the user tune a value after you've \
+written it. Use input.int()/input.float()/input.bool() for anything a user \
+might reasonably want to adjust (a length, a threshold, a toggle) instead \
+of hardcoding it — give each one a clear title=. Values you assign a \
+variable from input.*() work exactly like a plain number/bool everywhere \
+else in the script.
 - Do NOT use: request.security() (needs another symbol's/timeframe's data \
-this tool does not prefetch), input.*() (needs a UI to let a user tune a \
-value later, which does not exist here), strategy.*() (this tool authors \
-INDICATORS, never strategies — a different, separate capability).
+this tool does not prefetch), strategy.*() (this tool authors INDICATORS, \
+never strategies — a different, separate capability).
 - Pine has real for loops and real mutable state (var, :=) — unlike some \
 formula languages, a fixed-window weighted average (a Gaussian filter, \
 ALMA) does not need its taps unrolled by hand; write a real for loop over \
@@ -204,84 +193,19 @@ async def _write_formula(
     return _extract_pane(raw)
 
 
-def _forbidden_call_feedback(source: str) -> str | None:
-    """None if the source avoids every call this tool doesn't support
-    rendering (or doesn't wire up at all), otherwise the feedback to retry
-    with. A source-text check, not just a prompt rule — see FORBIDDEN_CALLS'
-    own comment for why this needs to be a real gate.
-    """
-    for call in FORBIDDEN_CALLS:
-        if call in source:
-            return (f"'{call}' is not supported by the chart renderer yet — "
-                     f"use plot() only (a band, via '<Name> Upper'/'<Name> Lower' titles, "
-                     f"is the honest way to approximate a filled/shaded look).")
-    for ns in FORBIDDEN_NAMESPACES:
-        if ns in source:
-            return f"'{ns}' is not available to this tool — see the system prompt's rules."
-    return None
-
-
-def _synthetic_bars(n: int = 80) -> list[dict]:
-    """A deterministic, non-degenerate OHLCV series for the dynamic check —
-    enough bars for common indicator windows (up to ~50) to settle past
-    their warmup period, with real (non-flat) movement so a formula that
-    divides by a range/spread doesn't accidentally pass by dividing by zero
-    on a dead-flat run. openTime in milliseconds — PineTS's own bar shape,
-    not this app's usual seconds convention (see lib/api/pine.ts's own note
-    on the same quirk).
-    """
-    rng = random.Random(7)
-    bars = []
-    price = 100.0
-    t0 = 1767000900000
-    for i in range(n):
-        price += rng.uniform(-1.0, 1.2)
-        open_ = price
-        close = price + rng.uniform(-0.5, 0.5)
-        high = max(open_, close) + rng.uniform(0.05, 0.5)
-        low = min(open_, close) - rng.uniform(0.05, 0.5)
-        bars.append({
-            "open": round(open_, 4), "high": round(high, 4), "low": round(low, 4),
-            "close": round(close, 4), "volume": rng.randint(1000, 10000),
-            "openTime": t0 + i * 60_000,
-        })
-        price = close
-    return bars
-
-
-async def _check(source: str, bars: list[dict]) -> str | None:
-    """None if the Pine source is fully usable, otherwise the feedback to
-    retry with. Two gates, in order: does it avoid calls the render
-    pipeline can't show (`_forbidden_call_feedback`, free — no subprocess),
-    and — only if that's clean — does it actually run against real bars and
-    produce at least one real plot() output (the sandbox call). The second
-    gate never runs on source that already failed the first, so an obvious
-    rule violation never pays for a sandboxed run.
-    """
-    feedback = _forbidden_call_feedback(source)
-    if feedback:
-        return feedback
-    result = await run_pine_script(source, bars, mode="indicator")
-    if not result["ok"]:
-        return result["error"] or "Pine execution failed"
-    if not result["plots"]:
-        return "The script ran but produced no plot() output — every indicator needs at least one plot() call with a distinct title."
-    return None
-
-
 async def generate_custom_indicator(ctx: ToolContext, args: dict) -> Any:
     description = str(args.get("description") or "").strip()
     if not description:
         return {"error": "A description of the indicator is required."}
 
-    bars = _synthetic_bars()
+    bars = synthetic_bars()
     pane, source = await _write_formula(ctx, description)
-    feedback = await _check(source, bars)
+    feedback = await check_pine_source(source, bars)
 
     if feedback:
         failed_source = source
         pane, source = await _write_formula(ctx, description, feedback=feedback, source=failed_source)
-        feedback = await _check(source, bars)
+        feedback = await check_pine_source(source, bars)
 
     if feedback:
         return {"error": f"Could not build a valid indicator: {feedback}"}

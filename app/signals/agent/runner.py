@@ -165,6 +165,16 @@ _SUMMARIES = {
         f"{b} — {len(r['support_resistance'])} levels"
         if r.get("support_resistance") is not None else b
     ),
+    "list_chart_indicators": lambda b, r: (
+        f"{b} — {r['count']} attached" if "count" in r else b
+    ),
+    "set_indicator_params": lambda b, r: (
+        f"{b} — {', '.join(f'{k}: {v}' for k, v in r['params'].items())}"
+        if r.get("params") else b
+    ),
+    "remove_chart_indicator": lambda b, r: (
+        f"{b} — {r['label']}" if r.get("label") else b
+    ),
     "position_size": lambda b, r: (
         f"{b} — {r['recommended_shares']} shares" if "recommended_shares" in r else b
     ),

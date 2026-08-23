@@ -51,6 +51,8 @@ class AgentToolbox:
         recorder: TurnRecorder | None = None,
         llm=None,
         budget: Budget | None = None,
+        chart_indicators: list[dict] | None = None,
+        chart_interval: str | None = None,
     ):
         settings = settings or get_settings()
         self.ctx = ToolContext(
@@ -67,6 +69,8 @@ class AgentToolbox:
             # here only for callers (mostly tests) that construct a toolbox
             # standalone, so ctx.budget is never None for a tool that needs it.
             budget=budget or Budget.from_settings(settings),
+            chart_indicators=chart_indicators,
+            chart_interval=chart_interval,
         )
         self.runner = ToolRunner(
             self.ctx, recorder,
