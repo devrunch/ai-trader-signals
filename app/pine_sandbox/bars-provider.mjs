@@ -28,24 +28,34 @@ export class BarsProvider {
   }
 
   async getMarketData() {
-    return this.bars.map((b) => ({
-      openTime: b.openTime,
-      open: b.open,
-      high: b.high,
-      low: b.low,
-      close: b.close,
-      volume: b.volume ?? 0,
+    return this.bars.map((b, i) => {
       // Real session-close time isn't known here (no calendar data in this
       // sandbox) -- next-bar-open minus 1ms is the same approximation
-      // PineTS's own 24/7-market normalizeCloseTime() uses, close enough
-      // for what scripts actually read closeTime for.
-      closeTime: b.openTime + 60_000 - 1,
-      quoteAssetVolume: 0,
-      numberOfTrades: 0,
-      takerBuyBaseAssetVolume: 0,
-      takerBuyQuoteAssetVolume: 0,
-      ignore: 0,
-    }));
+      // PineTS's own 24/7-market normalizeCloseTime() uses. Bar duration is
+      // inferred from real neighbor spacing rather than assumed to be 1
+      // minute -- a hardcoded 60s was wrong for every non-1m timeframe (5m,
+      // 15m, daily, ...), silently corrupting any script reading
+      // time-dependent built-ins off those charts. The last bar has no next
+      // neighbor to measure against, so it reuses the previous gap; a
+      // single-bar run has neither and falls back to 1 minute.
+      const next = this.bars[i + 1];
+      const prev = this.bars[i - 1];
+      const duration = next ? next.openTime - b.openTime : prev ? b.openTime - prev.openTime : 60_000;
+      return {
+        openTime: b.openTime,
+        open: b.open,
+        high: b.high,
+        low: b.low,
+        close: b.close,
+        volume: b.volume ?? 0,
+        closeTime: b.openTime + duration - 1,
+        quoteAssetVolume: 0,
+        numberOfTrades: 0,
+        takerBuyBaseAssetVolume: 0,
+        takerBuyQuoteAssetVolume: 0,
+        ignore: 0,
+      };
+    });
   }
 
   async getSymbolInfo(tickerId) {

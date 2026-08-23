@@ -1,5 +1,5 @@
 import { parentPort } from "node:worker_threads";
-import { PineTS } from "pinets";
+import { PineTS, Indicator } from "pinets";
 import { BarsProvider } from "./bars-provider.mjs";
 
 // Real TradingView requires `//@version=X` as a script's first line, but a
@@ -17,9 +17,23 @@ function ensureVersionPragma(source) {
   return VERSION_PRAGMA.test(source) ? source : `//@version=6\n${source}`;
 }
 
-parentPort.on("message", async ({ source, bars, mode, tickerId, timeframe, symbolInfo }) => {
+parentPort.on("message", async ({ source, bars, mode, tickerId, timeframe, symbolInfo, inputOverrides }) => {
   try {
     const runnableSource = ensureVersionPragma(source);
+    // A real PineTS Indicator, not a bare string -- this is what actually
+    // exposes input.*() metadata (getInputsMeta(), used to build a
+    // TradingView-style settings form) and a real per-input override
+    // mechanism (`.input[varId] = value`, confirmed against the real
+    // package to apply correctly at runtime), instead of the source-text
+    // substitution hack an earlier draft of this considered. Overrides are
+    // keyed by varId (the script's own variable name for that input, e.g.
+    // `length`) rather than title -- PineTS's own docs recommend this: a
+    // title can be blank or duplicated across inputs, varId can't.
+    const indicator = new Indicator(runnableSource);
+    for (const [varId, value] of Object.entries(inputOverrides ?? {})) {
+      indicator.input[varId] = value;
+    }
+    const inputsMeta = indicator.getInputsMeta();
     // Raw-array `source` is kept as the fallback for callers that don't
     // pass a tickerId (backward compatible) -- BarsProvider only changes
     // behavior for scripts that actually read syminfo/timeframe, verified
@@ -27,7 +41,7 @@ parentPort.on("message", async ({ source, bars, mode, tickerId, timeframe, symbo
     const pine = tickerId
       ? new PineTS(new BarsProvider(bars, symbolInfo), tickerId, timeframe || "1")
       : new PineTS(bars);
-    const ctx = await pine.run(runnableSource);
+    const ctx = await pine.run(indicator);
     if (mode === "strategy") {
       parentPort.postMessage({
         ok: true,
@@ -38,6 +52,7 @@ parentPort.on("message", async ({ source, bars, mode, tickerId, timeframe, symbo
           pending_orders: ctx.strategy?.pending_orders ?? [],
         },
         error: null,
+        inputsMeta,
       });
     } else {
       const plots = {};
@@ -76,7 +91,7 @@ parentPort.on("message", async ({ source, bars, mode, tickerId, timeframe, symbo
         // options is a per-point render hint no caller here uses.
         plots[name] = plot.data.map((p) => ({ time: p.time, value: p.value }));
       }
-      parentPort.postMessage({ ok: true, plots, fills, strategy: null, error: null });
+      parentPort.postMessage({ ok: true, plots, fills, strategy: null, error: null, inputsMeta });
     }
   } catch (err) {
     parentPort.postMessage({ ok: false, plots: null, strategy: null, error: String(err?.message ?? err) });

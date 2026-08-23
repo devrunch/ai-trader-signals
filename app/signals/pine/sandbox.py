@@ -149,6 +149,7 @@ async def run_pine_script(
     ticker_id: str | None = None,
     timeframe: str | None = None,
     symbol_info: dict[str, Any] | None = None,
+    input_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload = json.dumps({
         "source": source,
@@ -158,6 +159,7 @@ async def run_pine_script(
         "tickerId": ticker_id,
         "timeframe": timeframe,
         "symbolInfo": symbol_info,
+        "inputOverrides": input_overrides,
     })
     result = await _run_once(payload, timeout_s)
     if result.get("error") == "sandbox unavailable":

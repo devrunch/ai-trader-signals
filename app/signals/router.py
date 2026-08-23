@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from functools import lru_cache
-from typing import Literal
+from typing import Any, Literal
 
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
@@ -58,6 +58,10 @@ class PineRunBody(BaseModel):
     symbol: str | None = None
     exchange: str | None = None
     interval: str | None = None
+    # Real PineTS input.*() overrides, keyed by the script's own variable
+    # name (varId) -- e.g. {"length": 50} for `length = input.int(100, ...)`.
+    # See app/pine_sandbox/worker.mjs's Indicator usage for how these apply.
+    inputOverrides: dict[str, Any] | None = None
 
 
 @router.post("/pine/run")
@@ -67,13 +71,16 @@ async def pine_run(body: PineRunBody):
     proxies here -- this is the only place Pine actually executes.
 
     symbol/exchange (when given) get wrapped as a real PineTS IProvider
-    instead of a raw bars array, so scripts that read syminfo.*/timeframo.*
-    resolve real values instead of leaving syminfo undefined."""
+    instead of a raw bars array, so scripts that read syminfo.*/timeframe.*
+    resolve real values instead of leaving syminfo undefined. The response
+    also carries inputsMeta -- the script's own input.*() declarations
+    (type, title, default, min/max/options), for building a settings form."""
     ticker_id = f"{body.exchange}:{body.symbol}" if body.symbol else None
     symbol_info = {"symbol": body.symbol, "exchange": body.exchange} if body.symbol else None
     return await run_pine_script(
         body.source, body.bars, mode=body.mode,
         ticker_id=ticker_id, timeframe=body.interval, symbol_info=symbol_info,
+        input_overrides=body.inputOverrides,
     )
 
 
