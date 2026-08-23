@@ -51,17 +51,26 @@ _INTERVAL_MAP = {
 _INDEX_ALIASES = {"^NSEI": "NIFTY 50", "^BSESN": "SENSEX"}
 
 # TradingView's own convention for a commodity's continuous, auto-rolling
-# front-month contract (confirmed live: MCX:GOLD1!, MCX:GOLDM1!) -- adopted
+# contracts (confirmed live: MCX:GOLD1!, MCX:GOLD2!, MCX:GOLDM1!) -- adopted
 # here rather than inventing a different one, since that's the shape a user
-# coming from TradingView already expects. "GOLD1!" never reaches Kite's own
-# API as a literal symbol; _resolve_row() below strips the suffix and swaps
-# in whichever real dated contract (e.g. "GOLD25DECFUT") is currently
-# nearest-to-expiry-but-not-yet-expired, recomputed on every lookup rather
-# than cached as a decision -- there is no separate "roll" step to run,
-# because the answer is always freshly derived from Kite's own real,
-# vendor-sourced instrument dump (refreshed every _INSTRUMENTS_TTL_SECONDS),
-# never a hand-maintained mapping that could drift stale.
-_CONTINUOUS_SUFFIX = "1!"
+# coming from TradingView already expects. The digit is the rank by expiry,
+# 1 being front month (nearest, not yet expired), 2 the one after that, and
+# so on -- never a literal Kite symbol; _resolve_row() below parses it and
+# swaps in whichever real dated contract (e.g. "GOLD25DECFUT") is currently
+# at that rank, recomputed on every lookup rather than cached as a decision
+# -- there is no separate "roll" step to run, because the answer is always
+# freshly derived from Kite's own real, vendor-sourced instrument dump
+# (refreshed every _INSTRUMENTS_TTL_SECONDS), never a hand-maintained
+# mapping that could drift stale.
+_CONTINUOUS_SUFFIX = "1!"  # what search() suggests -- always front month
+_CONTINUOUS_PATTERN = re.compile(r"^(.+?)(\d+)!$")
+
+
+def _parse_continuous(symbol: str) -> tuple[str, int] | None:
+    """("GOLD", 1) for "GOLD1!", ("GOLD", 2) for "GOLD2!" -- None if the
+    symbol isn't shaped like a continuous contract at all."""
+    m = _CONTINUOUS_PATTERN.match(symbol)
+    return (m.group(1), int(m.group(2))) if m else None
 
 
 def kite_symbol(symbol: str) -> str:
@@ -190,26 +199,33 @@ class KiteProvider:
 
     def _resolve_row(self, symbol: str, exchange: str) -> dict[str, Any] | None:
         """The instrument row a symbol actually means -- direct lookup for
-        everything except an MCX continuous symbol ("GOLD1!"), which
-        resolves to whichever real dated contract is currently nearest to
-        expiry without having expired yet (the front-month/active
-        contract). See `_CONTINUOUS_SUFFIX`'s own comment for why this is
-        recomputed fresh on every call rather than cached as a decision."""
+        everything except an MCX continuous symbol ("GOLD1!", "GOLD2!", ...),
+        which resolves to whichever real dated contract currently sits at
+        that expiry rank without having expired yet. See
+        `_CONTINUOUS_SUFFIX`'s own comment for why this is recomputed on
+        every call rather than cached as a decision."""
         exch = exchange.upper()
         sym = kite_symbol(symbol)
-        if exch == "MCX" and sym.endswith(_CONTINUOUS_SUFFIX):
-            return self._resolve_mcx_continuous(sym[: -len(_CONTINUOUS_SUFFIX)])
+        if exch == "MCX":
+            parsed = _parse_continuous(sym)
+            if parsed:
+                name, rank = parsed
+                return self._resolve_mcx_continuous(name, rank)
         return self._instruments.get(exch, {}).get(sym)
 
-    def _resolve_mcx_continuous(self, name: str) -> dict[str, Any] | None:
+    def _resolve_mcx_continuous(self, name: str, rank: int = 1) -> dict[str, Any] | None:
+        """rank=1 is front month (nearest, not yet expired), rank=2 the one
+        after that, and so on -- TradingView's own SYMBOL1!/SYMBOL2!/...
+        convention."""
         today = date.today()
-        candidates = [
-            row for row in self._instruments.get("MCX", {}).values()
-            if str(row.get("name", "")).upper() == name.upper() and _as_date(row.get("expiry")) >= today
-        ]
-        if not candidates:
+        candidates = sorted(
+            (row for row in self._instruments.get("MCX", {}).values()
+             if str(row.get("name", "")).upper() == name.upper() and _as_date(row.get("expiry")) >= today),
+            key=lambda row: _as_date(row["expiry"]),
+        )
+        if rank < 1 or rank > len(candidates):
             return None
-        return min(candidates, key=lambda row: _as_date(row["expiry"]))
+        return candidates[rank - 1]
 
     # ------------------------------------------------------------------
     # get_quote
@@ -221,17 +237,17 @@ class KiteProvider:
     def _get_quote_sync(self, symbol: str, exchange: str) -> dict | None:
         try:
             self._ensure_token()
-            # Only an MCX continuous symbol ("GOLD1!") needs the instrument
-            # dump loaded at all -- every other quote (the overwhelming
-            # common case) keeps the existing fast, dump-free path exactly
-            # as before. Kite's quote() key uses whichever real dated
-            # tradingsymbol the continuous one resolves to; the RESPONSE
-            # below still echoes back the symbol the caller actually asked
-            # for ("GOLD1!"), matching TradingView's own convention of the
-            # continuous symbol staying stable while the real contract
-            # underneath rolls.
+            # Only an MCX continuous symbol ("GOLD1!", "GOLD2!", ...) needs
+            # the instrument dump loaded at all -- every other quote (the
+            # overwhelming common case) keeps the existing fast, dump-free
+            # path exactly as before. Kite's quote() key uses whichever real
+            # dated tradingsymbol the continuous one resolves to; the
+            # RESPONSE below still echoes back the symbol the caller
+            # actually asked for ("GOLD1!"), matching TradingView's own
+            # convention of the continuous symbol staying stable while the
+            # real contract underneath rolls.
             real_symbol = kite_symbol(symbol)
-            if exchange.upper() == "MCX" and real_symbol.endswith(_CONTINUOUS_SUFFIX):
+            if exchange.upper() == "MCX" and _parse_continuous(real_symbol):
                 self._ensure_instruments()
                 row = self._resolve_row(symbol, exchange)
                 if row is None:

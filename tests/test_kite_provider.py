@@ -367,6 +367,20 @@ class TestMcxContinuousContracts:
         row = provider._resolve_row("GOLD1!", "MCX")
         assert row["tradingsymbol"] != "GOLD25NOVFUT"
 
+    def test_gold2_bang_resolves_to_the_second_nearest_unexpired_contract(self):
+        """TradingView's own SYMBOL2!/SYMBOL3!/... convention -- the rank
+        after front month, still ranked by expiry, still never an already-
+        expired contract."""
+        provider = self._provider_with_mcx()
+
+        row = provider._resolve_row("GOLD2!", "MCX")
+
+        assert row["tradingsymbol"] == "GOLD26FEBFUT"  # the farther of the two live contracts
+
+    def test_a_rank_beyond_the_available_contracts_resolves_to_none_not_a_crash(self):
+        provider = self._provider_with_mcx()
+        assert provider._resolve_row("GOLD3!", "MCX") is None
+
     def test_different_commodities_do_not_leak_into_each_other(self):
         provider = self._provider_with_mcx()
 
