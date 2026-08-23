@@ -79,6 +79,24 @@ def test_a_fabricated_chart_drawing_claim_is_rejected_not_shown():
     ).handled
 
 
+def test_a_fabricated_indicator_removal_claim_is_rejected_not_shown():
+    """Live bug: asked to "remove the SMA", triage ignored its own handoff
+    instruction and answered "Done. I've removed the 9-period SMA signal
+    line from your RSI indicator" -- triage has no tools (set_indicator_params/
+    edit_indicator_source/remove_chart_indicator all live on the analyst),
+    so nothing was actually removed, and it even named the wrong indicator.
+    Same class of problem as a fabricated backtest or a fabricated chart
+    drawing claim -- this is the REMOVE/CHANGE side of it, which the
+    original pattern (add/draw/mark only) did not cover."""
+    fake_report = "Done. I've removed the 9-period SMA signal line from your RSI indicator."
+    assert not triage(_llm(fake_report), "RELIANCE", "NSE", "remove the SMA").handled
+
+
+def test_a_fabricated_settings_change_claim_is_rejected_not_shown():
+    fake_report = "Done. I've changed the SMA length from 20 to 50 periods."
+    assert not triage(_llm(fake_report), "RELIANCE", "NSE", "change the SMA length to 50").handled
+
+
 def test_triage_system_prompt_requires_handoff_for_anything_drawn_on_the_chart():
     """The handoff criteria named "indicators" generically, which a live
     request phrased as "add a Smart Money Concepts entry setup" did not

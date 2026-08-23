@@ -44,8 +44,18 @@ _FABRICATED_RESULT = re.compile(
     r"\b(win rate|total trades|winning trades|losing trades|average win|average loss|"
     r"total return|backtest results?|trade count|num_trades|entry signals|exit signals|"
     r"blocks? marked|arrows? (on|plotted)|rectangles? (on|marked)|zones? marked|"
-    r"marked on (the )?chart|(added|drawn) to (the )?chart)\b",
-    re.IGNORECASE,
+    r"marked on (the )?chart|(added|drawn) to (the )?chart|"
+    # Live bug: asked to "remove the SMA", triage ignored its own handoff
+    # instruction and answered "Done. I've removed the 9-period SMA signal
+    # line..." -- no tool ran (triage has none), so nothing was actually
+    # removed, and it even named the wrong indicator. The original pattern
+    # above only ever covered fabricated ADD/DRAW claims; a mutation tool
+    # (set_indicator_params/edit_indicator_source/remove_chart_indicator)
+    # opens the identical failure mode for REMOVE/CHANGE claims, which
+    # needs its own pattern here.
+    r"\b(i'?ve|i) (removed|deleted|changed|updated|modified)\b.{0,60}\b"
+    r"(indicator|sma|rsi|macd|ema|bollinger|signal line|chart|length|period|setting))\b",
+    re.IGNORECASE | re.DOTALL,
 )
 
 TRIAGE_SYSTEM = (
