@@ -112,6 +112,25 @@ class TestToolFlow:
         assert "custom_indicators" not in box.results
 
     @pytest.mark.asyncio
+    async def test_a_rejected_attempt_logs_the_description_and_the_real_feedback(self, trending_frame, caplog):
+        """Live gap: a real failure (3 calls, all rejected) had no way to
+        diagnose after the fact -- neither the analyst's own `description`
+        argument (its paraphrase of the user's actual request) nor the
+        rejected source/feedback were logged anywhere. A clean re-run of
+        the identical request succeeded 5/5 times in isolation, pointing at
+        the paraphrase rather than the model's raw Pine-writing ability --
+        but that was inference, not evidence, without this logging."""
+        box = _toolbox(trending_frame)
+        with patch("app.signals.agent.tools.graph_agent._write_formula", return_value=("main", SYNTAX_ERROR_SOURCE)):
+            with caplog.at_level("INFO", logger="app.signals.agent.tools.graph_agent"):
+                await box.execute("generate_custom_indicator", {"description": "a band with adjustable length"})
+
+        assert "a band with adjustable length" in caplog.text
+        assert "attempt 1 rejected" in caplog.text
+        assert "attempt 2 rejected" in caplog.text
+        assert SYNTAX_ERROR_SOURCE in caplog.text
+
+    @pytest.mark.asyncio
     async def test_no_plot_output_is_rejected(self, trending_frame):
         """A script that runs cleanly but never calls plot() (e.g. only
         computed a value and never displayed it) must not be accepted --

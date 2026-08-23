@@ -198,16 +198,28 @@ async def generate_custom_indicator(ctx: ToolContext, args: dict) -> Any:
     if not description:
         return {"error": "A description of the indicator is required."}
 
+    # Live investigation gap, found this session: a real failure (3 calls,
+    # all rejected) had no way to diagnose after the fact -- neither the
+    # analyst's own `description` argument (its paraphrase of what the user
+    # actually asked, which can drift from the original request) nor the
+    # rejected source/feedback were logged anywhere. A clean re-run of the
+    # exact same request succeeded 5/5 times in isolation, which points at
+    # the paraphrase (or something else about the live turn) rather than
+    # the model's raw Pine-writing ability -- but that's inference, not
+    # evidence, without this logging.
+    logger.info("generate_custom_indicator: description=%r", description[:300])
     bars = synthetic_bars()
     pane, source = await _write_formula(ctx, description)
     feedback = await check_pine_source(source, bars)
 
     if feedback:
+        logger.warning("generate_custom_indicator attempt 1 rejected: %s\nsource:\n%s", feedback, source)
         failed_source = source
         pane, source = await _write_formula(ctx, description, feedback=feedback, source=failed_source)
         feedback = await check_pine_source(source, bars)
 
     if feedback:
+        logger.warning("generate_custom_indicator attempt 2 rejected: %s\nsource:\n%s", feedback, source)
         return {"error": f"Could not build a valid indicator: {feedback}"}
 
     display_label = str(args.get("label") or description)[:60]
