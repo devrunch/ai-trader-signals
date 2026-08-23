@@ -17,7 +17,7 @@ import asyncio
 import logging
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from functools import partial
 from typing import Any
 
@@ -50,10 +50,42 @@ _INTERVAL_MAP = {
 # lookup finds nothing and raises KeyError.
 _INDEX_ALIASES = {"^NSEI": "NIFTY 50", "^BSESN": "SENSEX"}
 
+# TradingView's own convention for a commodity's continuous, auto-rolling
+# front-month contract (confirmed live: MCX:GOLD1!, MCX:GOLDM1!) -- adopted
+# here rather than inventing a different one, since that's the shape a user
+# coming from TradingView already expects. "GOLD1!" never reaches Kite's own
+# API as a literal symbol; _resolve_row() below strips the suffix and swaps
+# in whichever real dated contract (e.g. "GOLD25DECFUT") is currently
+# nearest-to-expiry-but-not-yet-expired, recomputed on every lookup rather
+# than cached as a decision -- there is no separate "roll" step to run,
+# because the answer is always freshly derived from Kite's own real,
+# vendor-sourced instrument dump (refreshed every _INSTRUMENTS_TTL_SECONDS),
+# never a hand-maintained mapping that could drift stale.
+_CONTINUOUS_SUFFIX = "1!"
+
 
 def kite_symbol(symbol: str) -> str:
     """The tradingsymbol Kite's own instrument dump actually uses."""
     return _INDEX_ALIASES.get(symbol.upper(), symbol.upper())
+
+
+def _as_date(value: Any) -> date:
+    """Kite's real SDK returns `expiry` as a `datetime.date` already, but
+    the mock fixtures used in tests (and conceivably a future SDK version)
+    carry it as a plain "YYYY-MM-DD" string -- coerced here once rather
+    than trusting the type at every call site. A missing/unparseable expiry
+    sorts last (date.max) instead of raising, since the row it belongs to
+    should never have passed `_ensure_instruments()`'s own `r.get("expiry")`
+    filter in the first place; this is a second line of defence, not the
+    primary guarantee."""
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.strptime(value, "%Y-%m-%d").date()
+        except ValueError:
+            pass
+    return date.max
 
 
 def _matches(haystack: str, needle: str, *, prefix_only: bool = False) -> bool:
@@ -71,6 +103,30 @@ def _matches(haystack: str, needle: str, *, prefix_only: bool = False) -> bool:
         if not ends_in_digit or end >= len(haystack) or not haystack[end].isdigit():
             return True
     return False
+
+
+def _score_match(symbol: str, name: str, q: str, q_compact: str, q_spaced: str) -> int | None:
+    """Lower is a better match; None means no match at all. Extracted from
+    `_search_sync` so MCX's per-commodity-name search (no real per-row
+    symbol to match against) can share the exact same ranking rules as
+    NSE/BSE's per-instrument search, rather than a second, driftable copy."""
+    symbol_l = symbol.lower()
+    name_l = name.lower()
+    name_compact = name_l.replace(" ", "")
+
+    if symbol_l == q:
+        return 0
+    if _matches(symbol_l, q, prefix_only=True):
+        return 1
+    if _matches(name_l, q, prefix_only=True) or _matches(name_l, q_spaced, prefix_only=True):
+        return 2
+    if _matches(name_compact, q_compact, prefix_only=True):
+        return 3
+    if _matches(symbol_l, q):
+        return 4
+    if _matches(name_l, q) or _matches(name_l, q_spaced) or _matches(name_compact, q_compact):
+        return 5
+    return None
 
 
 class KiteProvider:
@@ -118,7 +174,42 @@ class KiteProvider:
                 if (r.get("instrument_type") == "EQ" and " " not in r.get("tradingsymbol", ""))
                 or r.get("segment") == "INDICES"
             }
+        # MCX lists commodity FUTURES, not equities -- there is no "EQ" row
+        # to filter for. Options (instrument_type CE/PE) exist on MCX too and
+        # are deliberately excluded: futures-only is the scope this was
+        # built for, options are a real, separate, more complex concept
+        # (strikes, premium, a different P&L model entirely) not attempted
+        # here. Every kept row needs a real `expiry` for the continuous-
+        # contract resolution in `_resolve_row` to work at all.
+        mcx_rows = self._kite.instruments("MCX")
+        self._instruments["MCX"] = {
+            r["tradingsymbol"]: r for r in mcx_rows
+            if r.get("instrument_type") == "FUT" and r.get("expiry")
+        }
         self._instruments_loaded_at = self._now()
+
+    def _resolve_row(self, symbol: str, exchange: str) -> dict[str, Any] | None:
+        """The instrument row a symbol actually means -- direct lookup for
+        everything except an MCX continuous symbol ("GOLD1!"), which
+        resolves to whichever real dated contract is currently nearest to
+        expiry without having expired yet (the front-month/active
+        contract). See `_CONTINUOUS_SUFFIX`'s own comment for why this is
+        recomputed fresh on every call rather than cached as a decision."""
+        exch = exchange.upper()
+        sym = kite_symbol(symbol)
+        if exch == "MCX" and sym.endswith(_CONTINUOUS_SUFFIX):
+            return self._resolve_mcx_continuous(sym[: -len(_CONTINUOUS_SUFFIX)])
+        return self._instruments.get(exch, {}).get(sym)
+
+    def _resolve_mcx_continuous(self, name: str) -> dict[str, Any] | None:
+        today = date.today()
+        candidates = [
+            row for row in self._instruments.get("MCX", {}).values()
+            if str(row.get("name", "")).upper() == name.upper() and _as_date(row.get("expiry")) >= today
+        ]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda row: _as_date(row["expiry"]))
 
     # ------------------------------------------------------------------
     # get_quote
@@ -130,7 +221,23 @@ class KiteProvider:
     def _get_quote_sync(self, symbol: str, exchange: str) -> dict | None:
         try:
             self._ensure_token()
-            key = f"{exchange.upper()}:{kite_symbol(symbol)}"
+            # Only an MCX continuous symbol ("GOLD1!") needs the instrument
+            # dump loaded at all -- every other quote (the overwhelming
+            # common case) keeps the existing fast, dump-free path exactly
+            # as before. Kite's quote() key uses whichever real dated
+            # tradingsymbol the continuous one resolves to; the RESPONSE
+            # below still echoes back the symbol the caller actually asked
+            # for ("GOLD1!"), matching TradingView's own convention of the
+            # continuous symbol staying stable while the real contract
+            # underneath rolls.
+            real_symbol = kite_symbol(symbol)
+            if exchange.upper() == "MCX" and real_symbol.endswith(_CONTINUOUS_SUFFIX):
+                self._ensure_instruments()
+                row = self._resolve_row(symbol, exchange)
+                if row is None:
+                    return None
+                real_symbol = row["tradingsymbol"]
+            key = f"{exchange.upper()}:{real_symbol}"
             data = self._kite.quote(key)[key]
             ltp = float(data["last_price"])
             ohlc = data["ohlc"]
@@ -185,7 +292,7 @@ class KiteProvider:
         try:
             self._ensure_token()
             self._ensure_instruments()
-            row = self._instruments.get(exchange.upper(), {}).get(kite_symbol(symbol))
+            row = self._resolve_row(symbol, exchange)
             if row is None:
                 return None
 
@@ -235,25 +342,20 @@ class KiteProvider:
             for exch in ("NSE", "BSE"):
                 for symbol, row in self._instruments.get(exch, {}).items():
                     name = row.get("name") or symbol
-                    symbol_l = symbol.lower()
-                    name_l = name.lower()
-                    name_compact = name_l.replace(" ", "")
+                    score = _score_match(symbol, name, q, q_compact, q_spaced)
+                    if score is not None:
+                        scored.append((score, {"symbol": symbol, "name": name, "exchange": exch}))
 
-                    if symbol_l == q:
-                        score = 0
-                    elif _matches(symbol_l, q, prefix_only=True):
-                        score = 1
-                    elif _matches(name_l, q, prefix_only=True) or _matches(name_l, q_spaced, prefix_only=True):
-                        score = 2
-                    elif _matches(name_compact, q_compact, prefix_only=True):
-                        score = 3
-                    elif _matches(symbol_l, q):
-                        score = 4
-                    elif _matches(name_l, q) or _matches(name_l, q_spaced) or _matches(name_compact, q_compact):
-                        score = 5
-                    else:
-                        continue
-                    scored.append((score, {"symbol": symbol, "name": name, "exchange": exch}))
+            # MCX: one result per commodity (its continuous symbol, "GOLD1!"),
+            # never one per individual dated contract -- searching "gold"
+            # must not flood results with every live expiry month of the
+            # same underlying commodity. Matched against the commodity name
+            # only; the continuous symbol itself is synthetic (see
+            # _CONTINUOUS_SUFFIX) so there's no real "symbol" to match on.
+            for name in {row.get("name") for row in self._instruments.get("MCX", {}).values() if row.get("name")}:
+                score = _score_match(name, name, q, q_compact, q_spaced)
+                if score is not None:
+                    scored.append((score, {"symbol": f"{name}{_CONTINUOUS_SUFFIX}", "name": name, "exchange": "MCX"}))
 
             scored.sort(key=lambda pair: pair[0])
             return [item for _, item in scored[:limit]]

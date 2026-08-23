@@ -8,6 +8,7 @@ current access_token is mocked too, at the httpx level.
 """
 from __future__ import annotations
 
+from datetime import date, timedelta
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -15,6 +16,24 @@ import pytest
 
 from app.config import Settings
 from app.market.providers.kite_provider import KiteProvider
+
+TODAY = date.today()
+MCX_INSTRUMENTS = [
+    # Two live GOLD contracts, nearest expiry first once sorted -- the
+    # farther one must never be picked over the nearer one.
+    {"tradingsymbol": "GOLD25DECFUT", "name": "GOLD", "instrument_token": 111,
+     "instrument_type": "FUT", "segment": "MCX", "expiry": TODAY + timedelta(days=30)},
+    {"tradingsymbol": "GOLD26FEBFUT", "name": "GOLD", "instrument_token": 112,
+     "instrument_type": "FUT", "segment": "MCX", "expiry": TODAY + timedelta(days=90)},
+    # An already-expired GOLD contract Kite hasn't purged from the dump yet
+    # -- must never be picked as the "nearest" one just because its date is
+    # numerically smaller.
+    {"tradingsymbol": "GOLD25NOVFUT", "name": "GOLD", "instrument_token": 110,
+     "instrument_type": "FUT", "segment": "MCX", "expiry": TODAY - timedelta(days=5)},
+    # A different commodity entirely -- must never leak into a GOLD lookup.
+    {"tradingsymbol": "SILVER25DECFUT", "name": "SILVER", "instrument_token": 120,
+     "instrument_type": "FUT", "segment": "MCX", "expiry": TODAY + timedelta(days=30)},
+]
 
 NSE_INSTRUMENTS = [
     {"tradingsymbol": "RELIANCE", "name": "RELIANCE INDUSTRIES", "instrument_token": 738561,
@@ -261,6 +280,7 @@ class TestSearch:
                  "instrument_token": 1, "instrument_type": "EQ"},
             ],
             [],
+            [],  # MCX -- empty, not exercised by this test
         ])
 
         results = provider._search_sync("nifty", limit=8)
@@ -282,6 +302,7 @@ class TestSearch:
                  "instrument_token": 1, "instrument_type": "EQ"},
             ],
             [],
+            [],  # MCX -- empty, not exercised by this test
         ])
 
         results = provider._search_sync("nifty", limit=8)
@@ -295,6 +316,146 @@ class TestSearch:
         provider._kite.instruments = MagicMock(side_effect=RuntimeError("something new"))
 
         assert provider._search_sync("reliance", limit=8) == []
+
+
+class TestMcxContinuousContracts:
+    """MCX lists commodity FUTURES under contract-month-specific
+    tradingsymbols that expire and roll -- "GOLD1!" (TradingView's own
+    continuous-contract convention, confirmed live against tradingview.com)
+    resolves to whichever real dated contract is currently nearest to
+    expiry without having already expired, recomputed fresh from Kite's own
+    instrument dump on every lookup rather than cached as a decision."""
+
+    def _provider_with_mcx(self) -> KiteProvider:
+        provider = _provider_with_token()
+        provider._instruments = {
+            "NSE": {}, "BSE": {},
+            "MCX": {r["tradingsymbol"]: r for r in MCX_INSTRUMENTS},
+        }
+        provider._instruments_loaded_at = provider._now()
+        return provider
+
+    def test_ensure_instruments_keeps_only_futures_with_a_real_expiry(self):
+        provider = _provider_with_token()
+        provider._kite.instruments = MagicMock(side_effect=[
+            [], [],  # NSE, BSE -- empty, not exercised here
+            [
+                *MCX_INSTRUMENTS,
+                {"tradingsymbol": "GOLD25DEC5000CE", "name": "GOLD", "instrument_token": 200,
+                 "instrument_type": "CE", "segment": "MCX-OPT", "expiry": TODAY + timedelta(days=30)},
+                {"tradingsymbol": "JUNKNOFUT", "name": "JUNK", "instrument_token": 201,
+                 "instrument_type": "FUT", "segment": "MCX", "expiry": None},
+            ],
+        ])
+
+        provider._ensure_instruments()
+
+        kept = provider._instruments["MCX"]
+        assert set(kept) == {r["tradingsymbol"] for r in MCX_INSTRUMENTS}
+        assert "GOLD25DEC5000CE" not in kept  # options excluded -- futures only
+        assert "JUNKNOFUT" not in kept  # no expiry -- can't resolve a continuous contract from it
+
+    def test_continuous_symbol_resolves_to_the_nearest_unexpired_contract(self):
+        provider = self._provider_with_mcx()
+
+        row = provider._resolve_row("GOLD1!", "MCX")
+
+        assert row["tradingsymbol"] == "GOLD25DECFUT"  # nearer than GOLD26FEB, not expired like GOLD25NOV
+
+    def test_continuous_symbol_never_resolves_to_an_already_expired_contract(self):
+        provider = self._provider_with_mcx()
+        row = provider._resolve_row("GOLD1!", "MCX")
+        assert row["tradingsymbol"] != "GOLD25NOVFUT"
+
+    def test_different_commodities_do_not_leak_into_each_other(self):
+        provider = self._provider_with_mcx()
+
+        gold = provider._resolve_row("GOLD1!", "MCX")
+        silver = provider._resolve_row("SILVER1!", "MCX")
+
+        assert gold["tradingsymbol"] == "GOLD25DECFUT"
+        assert silver["tradingsymbol"] == "SILVER25DECFUT"
+
+    def test_an_unknown_commodity_resolves_to_none_not_a_crash(self):
+        provider = self._provider_with_mcx()
+        assert provider._resolve_row("PLATINUM1!", "MCX") is None
+
+    def test_a_commodity_whose_every_contract_has_expired_resolves_to_none(self):
+        provider = _provider_with_token()
+        provider._instruments = {
+            "NSE": {}, "BSE": {},
+            "MCX": {"GOLD25NOVFUT": MCX_INSTRUMENTS[2]},  # the expired one, alone
+        }
+        provider._instruments_loaded_at = provider._now()
+
+        assert provider._resolve_row("GOLD1!", "MCX") is None
+
+    def test_a_real_dated_mcx_symbol_still_resolves_directly_no_1_bang_needed(self):
+        """Not every MCX lookup goes through the continuous convention -- a
+        caller that already knows the exact contract (from search results,
+        or a saved chart) can still ask for it by its real tradingsymbol."""
+        provider = self._provider_with_mcx()
+        row = provider._resolve_row("GOLD26FEBFUT", "MCX")
+        assert row["tradingsymbol"] == "GOLD26FEBFUT"
+
+    def test_non_mcx_lookups_are_completely_unaffected(self):
+        """_resolve_row's new branch must never fire outside MCX -- an NSE
+        symbol that happened to end in "1!" (it never would in practice)
+        stays a plain direct lookup, same as before this existed."""
+        provider = _provider_with_token()
+        provider._instruments = {
+            "NSE": {r["tradingsymbol"]: r for r in NSE_INSTRUMENTS if r["instrument_type"] == "EQ"},
+            "BSE": {}, "MCX": {},
+        }
+        provider._instruments_loaded_at = provider._now()
+
+        assert provider._resolve_row("RELIANCE", "NSE")["tradingsymbol"] == "RELIANCE"
+
+    def test_get_quote_resolves_the_continuous_symbol_but_echoes_it_back(self):
+        """The Kite API call must use the real dated contract; the response
+        the rest of the app sees must still say "GOLD1!" -- TradingView's
+        own convention of the continuous symbol staying stable while the
+        real contract underneath rolls."""
+        provider = self._provider_with_mcx()
+        provider._kite.quote = MagicMock(return_value={
+            "MCX:GOLD25DECFUT": {
+                "last_price": 72500.0,
+                "ohlc": {"open": 72000.0, "high": 72800.0, "low": 71900.0, "close": 72100.0},
+                "volume": 12000,
+            }
+        })
+
+        result = provider._get_quote_sync("GOLD1!", "MCX")
+
+        provider._kite.quote.assert_called_once_with("MCX:GOLD25DECFUT")
+        assert result["symbol"] == "GOLD1!"
+        assert result["exchange"] == "MCX"
+        assert result["ltp"] == 72500.0
+
+    def test_get_quote_for_an_unresolvable_continuous_symbol_returns_none(self):
+        provider = self._provider_with_mcx()
+        assert provider._get_quote_sync("PLATINUM1!", "MCX") is None
+
+    def test_search_returns_one_result_per_commodity_not_one_per_dated_contract(self):
+        """Searching "gold" must not flood results with every live expiry
+        month of the same underlying commodity."""
+        provider = self._provider_with_mcx()
+
+        results = provider._search_sync("gold", limit=8)
+
+        mcx_results = [r for r in results if r["exchange"] == "MCX"]
+        assert len(mcx_results) == 1
+        assert mcx_results[0]["symbol"] == "GOLD1!"
+        assert mcx_results[0]["name"] == "GOLD"
+
+    def test_search_ranks_and_matches_mcx_the_same_way_as_equities(self):
+        provider = self._provider_with_mcx()
+
+        results = provider._search_sync("silver", limit=8)
+
+        symbols = [r["symbol"] for r in results]
+        assert "SILVER1!" in symbols
+        assert "GOLD1!" not in symbols  # no match for an unrelated commodity
 
 
 @pytest.mark.asyncio

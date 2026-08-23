@@ -65,6 +65,11 @@ class MarketDataRouter:
         kite = KiteProvider(get_settings())
         self.providers["NSE"] = kite
         self.providers["BSE"] = kite
+        # Commodity futures -- Kite Connect already supports the MCX segment
+        # natively, same vendor, same instance, no new provider needed. See
+        # KiteProvider's own MCX handling (_ensure_instruments, _resolve_row,
+        # the "GOLD1!" continuous-contract convention).
+        self.providers["MCX"] = kite
 
         self._quote_cache: TTLCache = TTLCache(maxsize=_QUOTE_CACHE_SIZE, ttl=QUOTE_TTL_SECONDS)
         self._intraday_cache: TTLCache = TTLCache(maxsize=_HISTORY_CACHE_SIZE, ttl=INTRADAY_TTL_SECONDS)

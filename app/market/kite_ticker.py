@@ -18,8 +18,6 @@ from typing import Any
 
 from kiteconnect import KiteTicker
 
-from app.market.providers.kite_provider import kite_symbol
-
 logger = logging.getLogger(__name__)
 
 
@@ -60,7 +58,11 @@ class KiteTickerClient:
 
     def _resolve(self, symbol: str, exchange: str) -> int | None:
         self._provider._ensure_instruments()
-        row = self._provider._instruments.get(exchange.upper(), {}).get(kite_symbol(symbol))
+        # Shared with KiteProvider's own quote/historical lookups so an MCX
+        # continuous symbol ("GOLD1!") resolves to the same real dated
+        # contract's instrument_token everywhere, not a second copy of the
+        # resolution rule that could drift from the REST path's.
+        row = self._provider._resolve_row(symbol, exchange)
         return row["instrument_token"] if row else None
 
     def subscribe(self, symbol: str, exchange: str) -> bool:

@@ -108,7 +108,7 @@ Rules: LONG ONLY — this product cannot short, so if the setup is bearish retur
 # server-side (indicators, levels, backtests) is exchange-agnostic maths over
 # OHLCV bars, so widening this list is safe on its own — it only changes how a
 # price is NAMED, never how one is calculated.
-_CURRENCY = {"NSE": "INR", "BSE": "INR", "NASDAQ": "USD", "NYSE": "USD"}
+_CURRENCY = {"NSE": "INR", "BSE": "INR", "NASDAQ": "USD", "NYSE": "USD", "MCX": "INR"}
 
 
 def chat_system_prompt(symbol: str, exchange: str, last_price: float) -> str:

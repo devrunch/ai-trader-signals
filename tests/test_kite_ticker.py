@@ -8,6 +8,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from app.market.kite_ticker import KiteTickerClient
+from app.market.providers.kite_provider import kite_symbol
 
 
 def _client(on_tick=None):
@@ -17,6 +18,16 @@ def _client(on_tick=None):
         "BSE": {},
     }
     provider._ensure_instruments = MagicMock()
+    # KiteTickerClient._resolve() now goes through the real provider's
+    # _resolve_row() (shared with the REST quote/historical paths, so an
+    # MCX continuous symbol resolves identically everywhere) -- `provider`
+    # here is a bare MagicMock stand-in, not a real KiteProvider, so this
+    # wires the same direct-dict-lookup behaviour _resolve_row falls back
+    # to for a non-continuous symbol, keeping the fixture fast and isolated
+    # rather than exercising real KiteProvider internals in a ticker test.
+    provider._resolve_row = MagicMock(
+        side_effect=lambda symbol, exchange: provider._instruments.get(exchange.upper(), {}).get(kite_symbol(symbol))
+    )
     ws = MagicMock()
     client = KiteTickerClient(api_key="key", access_token="tok",
                                kite_provider=provider, on_tick=on_tick or MagicMock())

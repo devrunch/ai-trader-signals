@@ -1,5 +1,5 @@
 """
-Exchange router for live price updates — NSE/BSE go to the real Kite
+Exchange router for live price updates — NSE/BSE/MCX go to the real Kite
 ticker, everything else gets a poll loop over the same market-data path
 every other quote call already uses. Mirrors
 MarketDataRouter._provider_for(exchange)'s existing role for
@@ -17,7 +17,7 @@ from app.market.kite_ticker import KiteTickerClient
 
 logger = logging.getLogger(__name__)
 
-_KITE_EXCHANGES = {"NSE", "BSE"}
+_KITE_EXCHANGES = {"NSE", "BSE", "MCX"}
 _CHANNEL = "market:ticks"
 
 
