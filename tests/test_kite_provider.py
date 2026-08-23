@@ -471,6 +471,31 @@ class TestMcxContinuousContracts:
         assert "SILVER1!" in symbols
         assert "GOLD1!" not in symbols  # no match for an unrelated commodity
 
+    def test_mcx_commodity_matches_beat_unrelated_nse_ticker_codes_on_a_tied_score(self):
+        """Live bug: "gold" tied MCX's real gold-family commodities against
+        unrelated NSE tickers that merely start with the same four letters
+        (GOLDSTAR-SM, GOLDIAM, ...) at the same score tier -- under a tight
+        result cap, insertion order alone used to decide the tie, and NSE
+        (scored first) always won, burying a real commodity like
+        GOLDGUINEA behind ticker-code coincidences."""
+        provider = _provider_with_token()
+        provider._instruments = {
+            "NSE": {
+                "GOLDSTAR-SM": {"tradingsymbol": "GOLDSTAR-SM", "name": "GOLDSTAR POWER"},
+                "GOLDIAM": {"tradingsymbol": "GOLDIAM", "name": "GOLDIAM INTERNATIONAL"},
+            },
+            "BSE": {},
+            "MCX": {
+                "GOLDGUINEA25DECFUT": {"tradingsymbol": "GOLDGUINEA25DECFUT", "name": "GOLDGUINEA",
+                                        "instrument_type": "FUT", "expiry": TODAY + timedelta(days=30)},
+            },
+        }
+        provider._instruments_loaded_at = provider._now()
+
+        results = provider._search_sync("gold", limit=1)
+
+        assert results[0]["symbol"] == "GOLDGUINEA1!"
+
 
 @pytest.mark.asyncio
 async def test_async_methods_wrap_the_sync_ones():

@@ -344,7 +344,18 @@ class KiteProvider:
         then substring on symbol/name. Every check goes through
         `_matches`, which refuses a match that runs into more digits right
         after it — otherwise "nifty50" prefix-matches "nifty500...", a
-        different number wearing the query as its first few characters."""
+        different number wearing the query as its first few characters.
+
+        `scored.sort()` below is stable, so a tie between two equal scores
+        keeps whichever was appended to `scored` first — MCX is scored
+        before NSE/BSE precisely to win those ties: MCX is a small, curated
+        list of maybe thirty real commodities named in plain English, so a
+        prefix match against one of those names ("gold" -> "GOLD") is a much
+        stronger relevance signal than the same prefix match landing on an
+        NSE ticker CODE that merely happens to start with the same letters
+        (confirmed live: "gold" tied "GOLD" itself against six unrelated NSE
+        symbols like "GOLDSTAR-SM"/"GOLDIAM", at the same score tier, and
+        insertion order alone decided who made the combined result cap)."""
         try:
             self._ensure_instruments()
             q = query.strip().lower()
@@ -355,12 +366,6 @@ class KiteProvider:
             q_spaced = re.sub(r"([a-z])(\d)", r"\1 \2", q)
 
             scored: list[tuple[int, dict]] = []
-            for exch in ("NSE", "BSE"):
-                for symbol, row in self._instruments.get(exch, {}).items():
-                    name = row.get("name") or symbol
-                    score = _score_match(symbol, name, q, q_compact, q_spaced)
-                    if score is not None:
-                        scored.append((score, {"symbol": symbol, "name": name, "exchange": exch}))
 
             # MCX: one result per commodity (its continuous symbol, "GOLD1!"),
             # never one per individual dated contract -- searching "gold"
@@ -372,6 +377,13 @@ class KiteProvider:
                 score = _score_match(name, name, q, q_compact, q_spaced)
                 if score is not None:
                     scored.append((score, {"symbol": f"{name}{_CONTINUOUS_SUFFIX}", "name": name, "exchange": "MCX"}))
+
+            for exch in ("NSE", "BSE"):
+                for symbol, row in self._instruments.get(exch, {}).items():
+                    name = row.get("name") or symbol
+                    score = _score_match(symbol, name, q, q_compact, q_spaced)
+                    if score is not None:
+                        scored.append((score, {"symbol": symbol, "name": name, "exchange": exch}))
 
             scored.sort(key=lambda pair: pair[0])
             return [item for _, item in scored[:limit]]
