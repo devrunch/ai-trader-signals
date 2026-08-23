@@ -67,3 +67,24 @@ test("plots never leak PineTS's internal __xxx__ bookkeeping keys, only real plo
   assert.equal(result.ok, true);
   assert.deepEqual(Object.keys(result.plots), ["SMA5"]);
 });
+
+test("a real fill(p1, p2, color) call surfaces as a fills entry naming the two real plots it fills, not a plots entry", () => {
+  const source = `//@version=5
+indicator("t", overlay=true)
+p1 = plot(ta.sma(close, 5), title="Fast")
+p2 = plot(ta.sma(close, 10), title="Slow")
+fill(p1, p2, color=color.new(color.blue, 85))`;
+  const result = run({ source, bars: BARS, mode: "indicator" });
+  assert.equal(result.ok, true);
+  // Real per-bar data lives under the two plots' own names, not "fill".
+  assert.ok(Array.isArray(result.plots["Fast"]));
+  assert.ok(Array.isArray(result.plots["Slow"]));
+  assert.equal(result.fills.length, 1);
+  assert.equal(result.fills[0].plot1, "Fast");
+  assert.equal(result.fills[0].plot2, "Slow");
+  assert.equal(result.fills[0].colors.length, BARS.length);
+  // color.new(color.blue, 85) resolves to a real hex string every bar --
+  // this is what makes the frontend's fill actually colored per bar
+  // instead of a guess.
+  assert.match(result.fills[0].colors.at(-1).color, /^#/);
+});
