@@ -1,9 +1,13 @@
 """
 DerivProvider — forex majors/minors and precious metals (XAU/XAG/XPD/XPT
-vs USD) via Deriv's public WebSocket API. Free, no account, no API key, no
-rate-limit wall -- confirmed live: all 29 instruments below stream
-concurrently on one connection with zero errors, and quote/historical
-requests here work the same way against the same public endpoint.
+vs USD) via Deriv's public WebSocket API. Free, no account, no API key.
+No rate-limit wall for ordinary use -- confirmed live: all 29 instruments
+below stream concurrently on one connection with zero errors, and
+quote/historical requests here work the same way against the same public
+endpoint. That does NOT extend to bursts of many short-lived connections in
+quick succession, though -- see _TICK_BACKFILL_SECONDS's own comment for
+where a real, tight rate limit showed up (heavy HTTP 429s from ~70-85
+rapid ticks_history requests).
 
 Deriv has no separate plain-REST surface -- every request (even a one-off
 quote) goes over WebSocket, so unlike every other provider in this app
@@ -17,6 +21,7 @@ KiteTickerClient's one persistent socket), not a new pattern.
 from __future__ import annotations
 
 import asyncio
+import bisect
 import json
 import logging
 
@@ -38,10 +43,40 @@ _VENDOR_ERRORS = (WebSocketException, OSError, TimeoutError,
 
 _GRANULARITY_MAP = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "1d": 86400}
 _BARS_PER_DAY = {"1m": 1440, "5m": 288, "15m": 96, "30m": 48, "1h": 24, "1d": 1}
-# Not vendor-confirmed (Deriv's ticks_history has no documented cap found) --
-# matches Twelve Data's own documented 5000-point ceiling as a safe
-# assumption; revisit if a real request ever hits it.
+# `count` on a `style: "candles"` request -- not vendor-confirmed (Deriv's
+# docs list no documented cap), matches Twelve Data's own documented
+# 5000-point ceiling as a safe assumption; revisit if a real request ever
+# hits it. NOT the same limit as `style: "ticks"` -- see _TICK_CHUNK_SECONDS,
+# confirmed live to silently cap around 1000 regardless of `count`.
 _MAX_COUNT = 5000
+
+# ticks_history with style="ticks" silently caps a single response at
+# roughly 1000 ticks, anchored to `end`, regardless of the `count` requested
+# -- confirmed live: a request for a full hour of XAUUSD ticks came back
+# with exactly 1000, covering only the most recent ~17 minutes, no error.
+# 900s (15 min) stays comfortably under that for a liquid pair, with margin;
+# _fetch_ticks_chunk's own trust check catches it on the rare chunk that
+# still exceeds it (a burst of activity), rather than assuming every chunk
+# is safe just because it's short.
+_TICK_CHUNK_SECONDS = 900
+# Deriv's real tick-history rate limit is far tighter than "no rate-limit
+# wall" (this module's own top-of-file claim, true for candles/quotes)
+# suggests -- confirmed live: backfilling a whole multi-day candle range
+# (~70-85 chunks, even bounded to _TICK_BACKFILL_CONCURRENCY in flight at
+# once) triggered heavy HTTP 429 rejections, 21-51s chart loads, and STILL
+# incomplete coverage anyway -- only whichever chunks happened to dodge the
+# limiter came back with real counts. Backfilling the entire fetched range
+# was never going to work at any concurrency; instead this only ever
+# attempts the most recent _TICK_BACKFILL_SECONDS of the range -- what's
+# actually visible on a freshly-loaded chart, not the full history panning
+# back could reach. 12 chunks at this width, comfortably under whatever
+# threshold triggered the 429s above. Older candles keep the honest 0.0,
+# same as a window Deriv's cache never covered at all.
+_TICK_BACKFILL_SECONDS = 3 * 3600
+# Bounded fan-out for the chunks that ARE requested -- same reasoning as
+# ToolContext.gather_bounded in the chat agent, just local here rather than
+# shared, since this module has no other concurrency-limiting need.
+_TICK_BACKFILL_CONCURRENCY = 8
 
 # App-facing symbol (no slash, matches this app's SYMBOL_RE) -> (Deriv's own
 # symbol, display name). All 29 real instruments Deriv's public API lists
@@ -80,6 +115,82 @@ async def _request(payload: dict) -> dict:
         await ws.send(json.dumps(payload))
         raw = await asyncio.wait_for(ws.recv(), timeout=15)
         return json.loads(raw)
+
+
+async def _fetch_ticks_chunk(pair: str, chunk_start: int, chunk_end: int) -> list[int] | None:
+    """Raw tick epochs in [chunk_start, chunk_end), or None if this one
+    chunk's own response can't be trusted.
+
+    Deriv silently narrows a ticks_history response to whatever it actually
+    has cached, with no error and without necessarily hitting the `count`
+    requested -- confirmed live: a request for a full hour of XAUUSD ticks
+    came back with exactly 1000 (well under the 5000 asked for), covering
+    only the most recent ~17 minutes. Absence of an error or a full `count`
+    is not by itself proof of full coverage, so this is trusted only when
+    the earliest tick actually returned reaches back near chunk_start
+    (_TICK_CHUNK_SECONDS of slack for a genuine no-tick-right-at-open gap).
+    """
+    try:
+        resp = await _request({
+            "ticks_history": pair, "style": "ticks",
+            "start": chunk_start, "end": chunk_end, "count": _MAX_COUNT,
+        })
+    except _VENDOR_ERRORS as e:
+        logger.warning("Deriv tick-volume chunk fetch failed for %s: %s", pair, e)
+        return None
+    if "error" in resp:
+        return None
+    times = (resp.get("history") or {}).get("times") or []
+    if not times:
+        return None
+
+    ints = sorted(int(t) for t in times)
+    if ints[0] > chunk_start + _TICK_CHUNK_SECONDS:
+        return None
+    return ints
+
+
+async def _backfill_tick_volume(
+    pair: str, start_epoch: int, end_epoch: int, bucket_starts: list[int]
+) -> list[float]:
+    """Tick count per candle, as a volume stand-in -- see this module's
+    top-of-file rationale for counting ticks at all (no real trade size on
+    a spot/CFD forex feed to report, same reason MT4/MT5 use the same
+    convention).
+
+    Only ever backfills the most recent _TICK_BACKFILL_SECONDS of
+    [start_epoch, end_epoch), not the whole candle range -- see that
+    constant's own comment for why (Deriv's real rate limit made
+    whole-range backfill both slow and, since the limiter kept knocking out
+    chunks anyway, no more complete than this deliberately narrower
+    version). One `_fetch_ticks_chunk` request per _TICK_CHUNK_SECONDS-wide
+    window within that trailing slice, fanned out with bounded concurrency.
+    A chunk whose own response can't be trusted contributes zero counts to
+    the candles inside it rather than a guess -- indistinguishable from
+    real zero activity in the final numbers, but never a silently wrong
+    nonzero one; candles entirely before the trailing slice get the same
+    honest 0.0 for the same reason. `bucket_starts` must be sorted
+    ascending -- the caller's `candles` list already is.
+    """
+    backfill_start = max(start_epoch, end_epoch - _TICK_BACKFILL_SECONDS)
+    chunk_starts = range(backfill_start, end_epoch, _TICK_CHUNK_SECONDS)
+    sem = asyncio.Semaphore(_TICK_BACKFILL_CONCURRENCY)
+
+    async def guarded(chunk_start: int) -> list[int] | None:
+        async with sem:
+            return await _fetch_ticks_chunk(pair, chunk_start, min(chunk_start + _TICK_CHUNK_SECONDS, end_epoch))
+
+    chunks = await asyncio.gather(*(guarded(cs) for cs in chunk_starts))
+
+    counts = [0] * len(bucket_starts)
+    for chunk_times in chunks:
+        if not chunk_times:
+            continue
+        for t in chunk_times:
+            idx = bisect.bisect_right(bucket_starts, t) - 1
+            if 0 <= idx < len(counts):
+                counts[idx] += 1
+    return [float(c) for c in counts]
 
 
 class DerivProvider:
@@ -166,12 +277,17 @@ class DerivProvider:
             if not candles:
                 return None
 
+            bucket_starts = [int(c["epoch"]) for c in candles]
+            tick_volume = await _backfill_tick_volume(
+                pair, bucket_starts[0], bucket_starts[-1] + granularity, bucket_starts,
+            )
+
             df = pd.DataFrame(candles)
             df["date"] = pd.to_datetime(df["epoch"], unit="s")
             df = df.set_index("date").sort_index()
             for col in ("open", "high", "low", "close"):
                 df[col] = df[col].astype(float)
-            df["volume"] = 0.0
+            df["volume"] = tick_volume
             return df[["open", "high", "low", "close", "volume"]]
         except _VENDOR_ERRORS as e:
             logger.warning("Deriv historical fetch failed for %s/%s: %s", symbol, exchange, e)
