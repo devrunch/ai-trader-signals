@@ -111,9 +111,21 @@ Rules: LONG ONLY — this product cannot short, so if the setup is bearish retur
 _CURRENCY = {"NSE": "INR", "BSE": "INR", "NASDAQ": "USD", "NYSE": "USD", "MCX": "INR"}
 
 
+def _currency_for(symbol: str, exchange: str) -> str:
+    """FOREX pairs are quoted in whichever currency is SECOND in the pair
+    (AUDCAD prices in CAD, EURJPY in JPY, ... -- only a minority of this
+    app's known pairs are actually USD-quoted) -- a flat exchange->currency
+    map like _CURRENCY above would be wrong for most of them, so this
+    derives it from the symbol itself instead of guessing "USD" for all of
+    FOREX. Every other exchange still goes through the flat map."""
+    if exchange.upper() == "FOREX" and len(symbol) >= 6:
+        return symbol.upper()[-3:]
+    return _CURRENCY.get(exchange.upper(), "")
+
+
 def chat_system_prompt(symbol: str, exchange: str, last_price: float) -> str:
     """System turn for the conversational agent."""
-    currency = _CURRENCY.get(exchange.upper(), "")
+    currency = _currency_for(symbol, exchange)
     return (
         "You are an experienced trading assistant embedded in a charting terminal, "
         f"currently looking at {symbol} ({exchange}), last price {currency} {last_price}.\n\n"

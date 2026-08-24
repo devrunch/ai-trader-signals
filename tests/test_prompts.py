@@ -1,6 +1,20 @@
 from __future__ import annotations
 
-from app.signals.prompts import chat_system_prompt
+from app.signals.prompts import _currency_for, chat_system_prompt
+
+
+def test_currency_for_derives_forex_quote_currency_from_the_symbol():
+    """A flat exchange->currency map would be wrong for most of this app's
+    known FOREX pairs -- only a minority are USD-quoted; AUDCAD prices in
+    CAD, EURJPY in JPY, not USD."""
+    assert _currency_for("XAUUSD", "FOREX") == "USD"
+    assert _currency_for("AUDCAD", "FOREX") == "CAD"
+    assert _currency_for("EURJPY", "FOREX") == "JPY"
+
+
+def test_currency_for_still_uses_the_flat_map_for_every_other_exchange():
+    assert _currency_for("RELIANCE", "NSE") == "INR"
+    assert _currency_for("AAPL", "NASDAQ") == "USD"
 
 
 def test_chat_system_prompt_forbids_describing_chart_changes_beyond_the_tool_result():
