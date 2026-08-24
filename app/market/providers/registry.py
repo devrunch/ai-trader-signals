@@ -31,6 +31,7 @@ from cachetools import TTLCache
 from app.config import get_settings
 from app.market.providers.base import MarketDataProvider
 from app.market.providers.kite_provider import KiteProvider
+from app.market.providers.twelve_data_provider import TwelveDataProvider
 from app.market.providers.yfinance_provider import YFinanceProvider
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,11 @@ class MarketDataRouter:
         # the "GOLD1!" continuous-contract convention).
         self.providers["MCX"] = kite
 
+        # Spot gold (XAU/USD) -- neither Kite (India-only) nor yfinance
+        # (XAUUSD=X unreliable in practice) cover this. See
+        # twelve_data_provider.py's own module docstring.
+        self.providers["FOREX"] = TwelveDataProvider(get_settings())
+
         self._quote_cache: TTLCache = TTLCache(maxsize=_QUOTE_CACHE_SIZE, ttl=QUOTE_TTL_SECONDS)
         self._intraday_cache: TTLCache = TTLCache(maxsize=_HISTORY_CACHE_SIZE, ttl=INTRADAY_TTL_SECONDS)
         self._daily_cache: TTLCache = TTLCache(maxsize=_HISTORY_CACHE_SIZE, ttl=DAILY_TTL_SECONDS)
@@ -99,15 +105,19 @@ class MarketDataRouter:
         """Symbol/company search across every exchange this app covers.
 
         Kite has no free-text search of its own, so KiteProvider answers from
-        its own instrument dump — NSE/BSE only, real listings. The fallback
-        vendor covers NASDAQ/NYSE the same way it always has. Both are asked
-        and the results concatenated, capped at the combined limit — neither
-        vendor knows about the other's half.
+        its own instrument dump — NSE/BSE/MCX, real listings. The fallback
+        vendor covers NASDAQ/NYSE the same way it always has. Twelve Data
+        (FOREX) has its own tiny hardcoded search (a single known pair right
+        now, not a live vendor call — see twelve_data_provider.py). All are
+        asked and the results concatenated, capped at the combined limit —
+        none of them knows about the others' half.
         """
         kite = self.providers.get("NSE")
+        forex = self.providers.get("FOREX")
         kite_results = await kite.search(query, limit) if kite is not None else []
+        forex_results = await forex.search(query, limit) if forex is not None else []
         fallback_results = await self.fallback.search(query, limit)
-        return (kite_results + fallback_results)[:limit]
+        return (forex_results + kite_results + fallback_results)[:limit]
 
     # ------------------------------------------------------------------
     # Cache plumbing

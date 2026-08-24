@@ -100,6 +100,10 @@ class Settings(BaseSettings):
     zerodha_user_id: str = ""
     zerodha_password: str = ""
     zerodha_totp_secret: str = ""
+    # Twelve Data — forex/commodity spot pairs (XAU/USD, ...) that neither
+    # Kite (India-only, no forex) nor yfinance (XAUUSD=X is flaky/unreliable
+    # in practice) actually cover. Free-tier key.
+    twelve_data_api_key: str = ""
 
     # ---- Signal thresholds ----
     confidence_threshold: float = 0.65
