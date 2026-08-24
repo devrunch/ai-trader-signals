@@ -16,3 +16,4 @@ redis>=5.0.0
 pytz>=2024.1
 cachetools>=5.5.0
 websockets>=13.0
+beautifulsoup4>=4.12.0

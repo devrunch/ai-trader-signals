@@ -106,6 +106,8 @@ _TOOL_LABELS: dict[str, str] = {
     "draw_on_chart": "Drawing on the chart",
     "plot_series": "Plotting on the chart",
     "generate_custom_indicator": "Writing custom indicator",
+    "fetch_url": "Reading the page",
+    "web_search": "Searching the web",
 }
 
 

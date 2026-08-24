@@ -43,6 +43,13 @@ def test_chat_system_prompt_points_to_list_chart_indicators_and_still_forbids_ov
     assert "not manual drawings" in prompt
 
 
+def test_chat_system_prompt_points_to_fetch_url_and_web_search():
+    prompt = chat_system_prompt("RELIANCE", "NSE", 1314.1)
+    assert "fetch_url" in prompt
+    assert "web_search" in prompt
+    assert "never quote a price, account figure, or statistic from the web" in prompt
+
+
 def test_chat_system_prompt_requires_trying_generate_custom_indicator_before_declining():
     """Live bug: asked for "a wavelet transform indicator that decomposes
     price into trend and cycle", the analyst answered in one round with no

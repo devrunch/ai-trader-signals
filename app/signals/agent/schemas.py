@@ -424,4 +424,45 @@ TOOL_SCHEMAS: list[dict] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_url",
+            "description": (
+                "Read a specific web page -- use this when the user pastes or names a URL "
+                "(a news article, a company filing, a blog post) they want you to read. "
+                "Returns the page's readable text, stripped of markup. Only http/https pages "
+                "with readable content (HTML, plain text, JSON) can be fetched."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "The full URL to fetch"},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": (
+                "Search the open web -- use for anything the built-in market/portfolio tools "
+                "can't answer (recent news you don't already have via sentiment, a company "
+                "event, general background). Returns a short synthesized answer plus source "
+                "snippets and URLs; call fetch_url on a specific source if you need more than "
+                "the snippet. Never treat a search result as a verified price or account figure "
+                "-- those still only come from this app's own tools."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The search query"},
+                    "max_results": {"type": "integer", "description": "Defaults to 5, max 10"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
