@@ -24,6 +24,7 @@ from fastapi import FastAPI, Response
 
 from app.config import get_settings
 from app.market import router as market_router_module
+from app.market.deriv_ticker import DerivTickerClient
 from app.market.kite_ticker import KiteTickerClient
 from app.market.live_ticks import LiveTicks
 from app.market.providers.registry import market_data_router
@@ -102,6 +103,20 @@ async def lifespan(app: FastAPI):
     # needs no Kite token at all, so it must not be gated behind one.
     live_ticks = LiveTicks(None, redis_client, get_quote)
     market_router_module.live_ticks = live_ticks
+
+    # Deriv's endpoint is public (no account, no API key -- see
+    # deriv_ticker.py's own module docstring), so unlike Kite there is no
+    # token/NestJS round-trip to retry in the background here: connect()
+    # itself is async-non-blocking (it only starts the client's own
+    # reconnect-forever loop) and can just run inline. A subscribe() that
+    # races the WebSocket handshake still finishes fails closed and is
+    # covered by the resubscribe pass below, same tolerance Kite's own
+    # startup race already accepts (see _attach_kite_ticker's own comment).
+    deriv_ticker = DerivTickerClient(
+        on_tick=lambda payload: asyncio.create_task(live_ticks.publish(payload)),
+    )
+    await deriv_ticker.connect()
+    live_ticks.set_deriv_ticker(deriv_ticker)
 
     kite_ticker: KiteTickerClient | None = None
 
@@ -188,6 +203,7 @@ async def lifespan(app: FastAPI):
         await live_ticks.close()
         if kite_ticker:
             kite_ticker.close()
+        await deriv_ticker.close()
         await redis_client.aclose()
         executor.shutdown(wait=False, cancel_futures=True)
         # The pine sandbox is now a persistent process (see sandbox.py) --

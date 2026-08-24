@@ -1,8 +1,8 @@
 """
 Exchange router for live price updates — NSE/BSE/MCX go to the real Kite
-ticker, everything else gets a poll loop over the same market-data path
-every other quote call already uses. Mirrors
-MarketDataRouter._provider_for(exchange)'s existing role for
+ticker, FOREX goes to the real Deriv ticker, everything else gets a poll
+loop over the same market-data path every other quote call already uses.
+Mirrors MarketDataRouter._provider_for(exchange)'s existing role for
 quotes/historical/search; this is the equivalent for live ticks.
 """
 from __future__ import annotations
@@ -13,19 +13,23 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from app.market.deriv_ticker import DerivTickerClient
 from app.market.kite_ticker import KiteTickerClient
 
 logger = logging.getLogger(__name__)
 
 _KITE_EXCHANGES = {"NSE", "BSE", "MCX"}
+_DERIV_EXCHANGES = {"FOREX"}
 _CHANNEL = "market:ticks"
 
 
 class LiveTicks:
     def __init__(self, kite_ticker: KiteTickerClient | None, redis_client,
                  get_quote: Callable[[str, str], Awaitable[dict[str, Any] | None]],
-                 poll_interval_seconds: float = 5.0):
+                 poll_interval_seconds: float = 5.0,
+                 deriv_ticker: DerivTickerClient | None = None):
         self._kite = kite_ticker
+        self._deriv = deriv_ticker
         self._redis = redis_client
         self._get_quote = get_quote
         self._poll_interval = poll_interval_seconds
@@ -37,6 +41,12 @@ class LiveTicks:
         on it."""
         self._kite = kite_ticker
 
+    def set_deriv_ticker(self, deriv_ticker: DerivTickerClient) -> None:
+        """Same reasoning as set_kite_ticker -- construction doesn't wait on
+        Deriv's connection finishing, FOREX just falls through to the poll
+        path (still correct, just not real-time) until this is called."""
+        self._deriv = deriv_ticker
+
     async def subscribe(self, symbol: str, exchange: str) -> bool:
         key = (symbol.upper(), exchange.upper())
         if exchange.upper() in _KITE_EXCHANGES:
@@ -46,6 +56,12 @@ class LiveTicks:
             # list on first use — keep that off the event loop.
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(None, self._kite.subscribe, symbol, exchange)
+        if exchange.upper() in _DERIV_EXCHANGES:
+            if self._deriv is None:
+                return False
+            # DerivTickerClient is natively async (see its own module
+            # docstring) -- no executor hop needed, unlike Kite's threaded SDK.
+            return await self._deriv.subscribe(symbol, exchange)
         if key in self._poll_tasks:
             return True
         self._poll_tasks[key] = asyncio.create_task(self._poll_loop(*key))
@@ -58,6 +74,11 @@ class LiveTicks:
                 return
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, self._kite.unsubscribe, symbol, exchange)
+            return
+        if exchange.upper() in _DERIV_EXCHANGES:
+            if self._deriv is None:
+                return
+            await self._deriv.unsubscribe(symbol, exchange)
             return
         task = self._poll_tasks.pop(key, None)
         if task:

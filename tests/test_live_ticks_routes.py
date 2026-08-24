@@ -12,6 +12,22 @@ import main as main_module
 from main import app
 
 
+class _FakeDerivTickerClient:
+    """Stands in for the real DerivTickerClient in tests that exercise
+    main.lifespan() end to end -- without this, lifespan's own
+    `await deriv_ticker.connect()` would spawn a real websocket connection
+    attempt to the real Deriv endpoint on every one of these tests."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def connect(self):
+        pass
+
+    async def close(self):
+        pass
+
+
 def test_subscribe_route_calls_live_ticks(monkeypatch):
     live_ticks = AsyncMock()
     live_ticks.subscribe.return_value = True
@@ -96,12 +112,14 @@ async def test_resubscribe_still_covers_non_kite_symbols_when_kite_attach_fails(
     class FakeLiveTicks:
         def __init__(self, *args, **kwargs):
             self.resubscribe_from = AsyncMock()
+            self.set_deriv_ticker = AsyncMock()
             created_live_ticks.append(self)
 
         async def close(self):
             pass
 
     monkeypatch.setattr(main_module, "LiveTicks", FakeLiveTicks)
+    monkeypatch.setattr(main_module, "DerivTickerClient", _FakeDerivTickerClient)
 
     async def fake_get_with_retry(url, headers, *, what):
         assert "active-symbols" in url
@@ -143,12 +161,14 @@ async def test_resubscribe_still_covers_non_kite_symbols_when_kite_attach_raises
     class FakeLiveTicks:
         def __init__(self, *args, **kwargs):
             self.resubscribe_from = AsyncMock()
+            self.set_deriv_ticker = AsyncMock()
             created_live_ticks.append(self)
 
         async def close(self):
             pass
 
     monkeypatch.setattr(main_module, "LiveTicks", FakeLiveTicks)
+    monkeypatch.setattr(main_module, "DerivTickerClient", _FakeDerivTickerClient)
 
     def bad_json():
         raise ValueError("malformed response")
@@ -202,10 +222,12 @@ async def test_shutdown_survives_a_failed_background_task(monkeypatch):
     class FakeLiveTicks:
         def __init__(self, *args, **kwargs):
             self.resubscribe_from = AsyncMock(side_effect=RuntimeError("boom"))
+            self.set_deriv_ticker = AsyncMock()
             self.close = AsyncMock()
             created_live_ticks.append(self)
 
     monkeypatch.setattr(main_module, "LiveTicks", FakeLiveTicks)
+    monkeypatch.setattr(main_module, "DerivTickerClient", _FakeDerivTickerClient)
 
     async def fake_get_with_retry(url, headers, *, what):
         assert "active-symbols" in url

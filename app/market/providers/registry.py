@@ -30,29 +30,22 @@ from cachetools import TTLCache
 
 from app.config import get_settings
 from app.market.providers.base import MarketDataProvider
+from app.market.providers.deriv_provider import DerivProvider
 from app.market.providers.kite_provider import KiteProvider
-from app.market.providers.twelve_data_provider import TwelveDataProvider
 from app.market.providers.yfinance_provider import YFinanceProvider
 
 logger = logging.getLogger(__name__)
 
 # A quote is a live price; 45s is the longest a chart or an order-preview can be
-# stale before it is misleading. NSE/BSE/MCX don't really lean on this for
-# "live" feel -- Kite's own ticker pushes ticks straight through, independent
-# of this cache -- so 45s only meaningfully bounds the poll-loop exchanges
-# (NASDAQ/NYSE/FOREX, see live_ticks.py's _poll_loop).
+# stale before it is misleading. NSE/BSE/MCX/FOREX don't really lean on this
+# for "live" feel -- Kite's and Deriv's own tickers push ticks straight
+# through, independent of this cache -- so 45s only meaningfully bounds the
+# poll-loop exchanges (NASDAQ/NYSE, see live_ticks.py's _poll_loop). FOREX
+# used to need its own shorter, dedicated bucket here when it rode that same
+# generic poll loop against a credit-metered vendor (Twelve Data); it no
+# longer does either, now that live_ticks.py routes FOREX to a real Deriv
+# ticker (deriv_ticker.py) with no meaningful rate ceiling.
 QUOTE_TTL_SECONDS = 45
-# FOREX gets its own, shorter TTL -- a dedicated bucket rather than lowering
-# QUOTE_TTL_SECONDS for every exchange, so NSE/BSE/MCX's own Kite REST call
-# volume is untouched. live_ticks.py's poll loop calls get_quote every 5s
-# (LiveTicks.__init__'s poll_interval_seconds), so this TTL -- not that
-# interval -- is what actually caps real Twelve Data credit spend: a real
-# vendor call happens at most once per TTL window, ~60/FOREX_QUOTE_TTL_SECONDS
-# times a minute. 15s keeps that at ~4/min, well under the free tier's 8/min
-# ceiling even with margin for a second concurrent poller (e.g. a stray
-# unsubscribe race) -- do not drop this below ~8s without re-checking the
-# free-tier limit first.
-FOREX_QUOTE_TTL_SECONDS = 15
 # A 15m bar cannot change more often than every 15m, and the in-progress bar is
 # the only one that moves. 5 min is a safe compromise for every intraday size.
 INTRADAY_TTL_SECONDS = 300
@@ -86,13 +79,13 @@ class MarketDataRouter:
         # the "GOLD1!" continuous-contract convention).
         self.providers["MCX"] = kite
 
-        # Spot gold (XAU/USD) -- neither Kite (India-only) nor yfinance
-        # (XAUUSD=X unreliable in practice) cover this. See
-        # twelve_data_provider.py's own module docstring.
-        self.providers["FOREX"] = TwelveDataProvider(get_settings())
+        # Forex majors/minors + precious metals -- neither Kite (India-only)
+        # nor yfinance (unreliable in practice for this) cover it. Free,
+        # no account, no rate-limit wall -- see deriv_provider.py's own
+        # module docstring.
+        self.providers["FOREX"] = DerivProvider()
 
         self._quote_cache: TTLCache = TTLCache(maxsize=_QUOTE_CACHE_SIZE, ttl=QUOTE_TTL_SECONDS)
-        self._forex_quote_cache: TTLCache = TTLCache(maxsize=_QUOTE_CACHE_SIZE, ttl=FOREX_QUOTE_TTL_SECONDS)
         self._intraday_cache: TTLCache = TTLCache(maxsize=_HISTORY_CACHE_SIZE, ttl=INTRADAY_TTL_SECONDS)
         self._daily_cache: TTLCache = TTLCache(maxsize=_HISTORY_CACHE_SIZE, ttl=DAILY_TTL_SECONDS)
         self._negative_cache: TTLCache = TTLCache(
@@ -121,11 +114,11 @@ class MarketDataRouter:
 
         Kite has no free-text search of its own, so KiteProvider answers from
         its own instrument dump — NSE/BSE/MCX, real listings. The fallback
-        vendor covers NASDAQ/NYSE the same way it always has. Twelve Data
-        (FOREX) has its own tiny hardcoded search (a single known pair right
-        now, not a live vendor call — see twelve_data_provider.py). All are
-        asked and the results concatenated, capped at the combined limit —
-        none of them knows about the others' half.
+        vendor covers NASDAQ/NYSE the same way it always has. Deriv (FOREX)
+        matches against its own known-pairs table (see deriv_provider.py) --
+        29 real instruments, not a live vendor search call. All are asked
+        and the results concatenated, capped at the combined limit — none of
+        them knows about the others' half.
         """
         kite = self.providers.get("NSE")
         forex = self.providers.get("FOREX")
@@ -158,9 +151,6 @@ class MarketDataRouter:
         cache.pop(key, None)
         self._negative_cache.pop(key, None)
 
-    def _quote_cache_for(self, exchange: str) -> TTLCache:
-        return self._forex_quote_cache if exchange.upper() == "FOREX" else self._quote_cache
-
     # ------------------------------------------------------------------
     # Public API. Positional signatures are unchanged — app/signals/** calls
     # these — and `bypass_cache` is keyword-only with a safe default.
@@ -169,7 +159,7 @@ class MarketDataRouter:
         self, symbol: str, exchange: str = "NSE", *, bypass_cache: bool = False
     ) -> dict | None:
         key = ("quote", symbol.upper(), exchange.upper())
-        cache = self._quote_cache_for(exchange)
+        cache = self._quote_cache
 
         if not bypass_cache:
             hit = cache.get(key)
@@ -267,7 +257,7 @@ class MarketDataRouter:
         single call is not enough.
         """
         sym, exch = symbol.upper(), exchange.upper()
-        self._clear_key(self._quote_cache_for(exch), ("quote", sym, exch))
+        self._clear_key(self._quote_cache, ("quote", sym, exch))
         for cache in (self._intraday_cache, self._daily_cache):
             for key in [k for k in list(cache.keys()) if k[1] == sym and k[2] == exch]:
                 self._clear_key(cache, key)
@@ -276,7 +266,6 @@ class MarketDataRouter:
         """Sizes only — cheap enough to expose from a readiness/debug endpoint."""
         return {
             "quotes": len(self._quote_cache),
-            "forex_quotes": len(self._forex_quote_cache),
             "intraday": len(self._intraday_cache),
             "daily": len(self._daily_cache),
             "negative": len(self._negative_cache),

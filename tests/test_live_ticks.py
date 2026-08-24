@@ -148,6 +148,72 @@ async def test_close_cancels_every_running_poll_task():
 
 
 @pytest.mark.asyncio
+async def test_forex_routes_to_the_deriv_ticker():
+    live, kite_ticker, redis_client, _ = _live_ticks()
+    deriv_ticker = AsyncMock()
+    deriv_ticker.subscribe = AsyncMock(return_value=True)
+    live.set_deriv_ticker(deriv_ticker)
+
+    ok = await live.subscribe("XAUUSD", "FOREX")
+
+    deriv_ticker.subscribe.assert_awaited_once_with("XAUUSD", "FOREX")
+    kite_ticker.subscribe.assert_not_called()
+    assert ok is True
+
+
+@pytest.mark.asyncio
+async def test_subscribing_a_forex_symbol_with_no_deriv_ticker_fails_closed():
+    """Same fail-closed behavior as Kite's own not-yet-attached case
+    (test_subscribing_an_nse_symbol_with_no_kite_ticker_fails_closed) --
+    _DERIV_EXCHANGES never falls through to the generic poll loop below it,
+    same as _KITE_EXCHANGES never does either."""
+    live, kite_ticker, redis_client, quote_fn = _live_ticks()
+
+    ok = await live.subscribe("XAUUSD", "FOREX")
+
+    assert ok is False
+    assert quote_fn.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_unsubscribing_forex_with_no_deriv_ticker_does_not_raise():
+    redis_client = AsyncMock()
+    quote_fn = AsyncMock(return_value=None)
+    live = LiveTicks(None, redis_client, quote_fn, poll_interval_seconds=0.01)
+
+    await live.unsubscribe("XAUUSD", "FOREX")  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_set_deriv_ticker_attaches_it_after_construction():
+    redis_client = AsyncMock()
+    quote_fn = AsyncMock(return_value=None)
+    live = LiveTicks(None, redis_client, quote_fn, poll_interval_seconds=0.01)
+    deriv_ticker = AsyncMock()
+    deriv_ticker.subscribe = AsyncMock(return_value=True)
+
+    live.set_deriv_ticker(deriv_ticker)
+    ok = await live.subscribe("XAUUSD", "FOREX")
+
+    assert ok is True
+    deriv_ticker.subscribe.assert_awaited_once_with("XAUUSD", "FOREX")
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_forex_routes_to_the_deriv_ticker():
+    live, _, _, _ = _live_ticks()
+    deriv_ticker = AsyncMock()
+    deriv_ticker.subscribe = AsyncMock(return_value=True)
+    deriv_ticker.unsubscribe = AsyncMock()
+    live.set_deriv_ticker(deriv_ticker)
+    await live.subscribe("XAUUSD", "FOREX")
+
+    await live.unsubscribe("XAUUSD", "FOREX")
+
+    deriv_ticker.unsubscribe.assert_awaited_once_with("XAUUSD", "FOREX")
+
+
+@pytest.mark.asyncio
 async def test_poll_loop_survives_a_get_quote_exception_and_keeps_polling():
     calls = {"n": 0}
 
