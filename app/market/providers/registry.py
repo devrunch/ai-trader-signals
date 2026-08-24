@@ -37,8 +37,22 @@ from app.market.providers.yfinance_provider import YFinanceProvider
 logger = logging.getLogger(__name__)
 
 # A quote is a live price; 45s is the longest a chart or an order-preview can be
-# stale before it is misleading.
+# stale before it is misleading. NSE/BSE/MCX don't really lean on this for
+# "live" feel -- Kite's own ticker pushes ticks straight through, independent
+# of this cache -- so 45s only meaningfully bounds the poll-loop exchanges
+# (NASDAQ/NYSE/FOREX, see live_ticks.py's _poll_loop).
 QUOTE_TTL_SECONDS = 45
+# FOREX gets its own, shorter TTL -- a dedicated bucket rather than lowering
+# QUOTE_TTL_SECONDS for every exchange, so NSE/BSE/MCX's own Kite REST call
+# volume is untouched. live_ticks.py's poll loop calls get_quote every 5s
+# (LiveTicks.__init__'s poll_interval_seconds), so this TTL -- not that
+# interval -- is what actually caps real Twelve Data credit spend: a real
+# vendor call happens at most once per TTL window, ~60/FOREX_QUOTE_TTL_SECONDS
+# times a minute. 15s keeps that at ~4/min, well under the free tier's 8/min
+# ceiling even with margin for a second concurrent poller (e.g. a stray
+# unsubscribe race) -- do not drop this below ~8s without re-checking the
+# free-tier limit first.
+FOREX_QUOTE_TTL_SECONDS = 15
 # A 15m bar cannot change more often than every 15m, and the in-progress bar is
 # the only one that moves. 5 min is a safe compromise for every intraday size.
 INTRADAY_TTL_SECONDS = 300
@@ -78,6 +92,7 @@ class MarketDataRouter:
         self.providers["FOREX"] = TwelveDataProvider(get_settings())
 
         self._quote_cache: TTLCache = TTLCache(maxsize=_QUOTE_CACHE_SIZE, ttl=QUOTE_TTL_SECONDS)
+        self._forex_quote_cache: TTLCache = TTLCache(maxsize=_QUOTE_CACHE_SIZE, ttl=FOREX_QUOTE_TTL_SECONDS)
         self._intraday_cache: TTLCache = TTLCache(maxsize=_HISTORY_CACHE_SIZE, ttl=INTRADAY_TTL_SECONDS)
         self._daily_cache: TTLCache = TTLCache(maxsize=_HISTORY_CACHE_SIZE, ttl=DAILY_TTL_SECONDS)
         self._negative_cache: TTLCache = TTLCache(
@@ -143,6 +158,9 @@ class MarketDataRouter:
         cache.pop(key, None)
         self._negative_cache.pop(key, None)
 
+    def _quote_cache_for(self, exchange: str) -> TTLCache:
+        return self._forex_quote_cache if exchange.upper() == "FOREX" else self._quote_cache
+
     # ------------------------------------------------------------------
     # Public API. Positional signatures are unchanged — app/signals/** calls
     # these — and `bypass_cache` is keyword-only with a safe default.
@@ -151,7 +169,7 @@ class MarketDataRouter:
         self, symbol: str, exchange: str = "NSE", *, bypass_cache: bool = False
     ) -> dict | None:
         key = ("quote", symbol.upper(), exchange.upper())
-        cache = self._quote_cache
+        cache = self._quote_cache_for(exchange)
 
         if not bypass_cache:
             hit = cache.get(key)
@@ -249,7 +267,7 @@ class MarketDataRouter:
         single call is not enough.
         """
         sym, exch = symbol.upper(), exchange.upper()
-        self._clear_key(self._quote_cache, ("quote", sym, exch))
+        self._clear_key(self._quote_cache_for(exch), ("quote", sym, exch))
         for cache in (self._intraday_cache, self._daily_cache):
             for key in [k for k in list(cache.keys()) if k[1] == sym and k[2] == exch]:
                 self._clear_key(cache, key)
@@ -258,6 +276,7 @@ class MarketDataRouter:
         """Sizes only — cheap enough to expose from a readiness/debug endpoint."""
         return {
             "quotes": len(self._quote_cache),
+            "forex_quotes": len(self._forex_quote_cache),
             "intraday": len(self._intraday_cache),
             "daily": len(self._daily_cache),
             "negative": len(self._negative_cache),
