@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from app.market.providers.deriv_provider import tick_volume_since
 from app.market.providers.registry import market_data_router
 
 logger = logging.getLogger(__name__)
@@ -16,6 +17,15 @@ logger = logging.getLogger(__name__)
 async def get_quote(symbol: str, exchange: str = "NSE") -> dict | None:
     """Current price data for an equity or forex pair. exchange = NSE | BSE | FOREX | ..."""
     return await market_data_router.get_quote(symbol, exchange)
+
+
+async def get_tick_volume(symbol: str, since_epoch: int) -> int | None:
+    """Real-time ECN tick count since `since_epoch` (Unix seconds) -- the
+    still-forming candle's live volume, polled by the chart rather than
+    waiting on the next historical fetch. FOREX/metals only (Dukascopy);
+    None for anything else, or a real vendor gap -- see tick_volume_since's
+    own docstring for why that must not collapse to 0."""
+    return await tick_volume_since(symbol, since_epoch)
 
 
 async def search_symbols(query: str, limit: int = 8) -> list[dict]:

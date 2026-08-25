@@ -34,6 +34,7 @@ import asyncio
 import bisect
 import json
 import logging
+import time
 
 import pandas as pd
 import websockets
@@ -123,6 +124,28 @@ async def _dukascopy_tick_volume(app_symbol: str, start_epoch: int, end_epoch: i
         if 0 <= idx < len(counts):
             counts[idx] += 1
     return [float(c) for c in counts]
+
+
+async def tick_volume_since(app_symbol: str, since_epoch: int) -> int | None:
+    """Real ECN tick count in [since_epoch, now) -- what the terminal polls
+    every few seconds to keep the still-forming candle's volume live.
+    get_historical_df's own bucketed volume only refreshes on a fresh fetch
+    (a new chart load, a pan-back), so without this the current candle sat
+    at whatever it was when that fetch ran, same "not live" gap this exists
+    to close.
+
+    None means "not a Dukascopy-covered instrument, or the vendor call
+    itself failed" -- the caller must not treat that as 0 ticks, a real and
+    different answer (see fetch_tick_timestamps' own docstring for why a gap
+    and a genuine empty range are indistinguishable one level down, but
+    "not covered at all" is knowable here before ever calling it)."""
+    if deriv_symbol_for(app_symbol) is None:
+        return None
+    now_ms = int(time.time() * 1000)
+    ticks_ms = await dukascopy_bridge.fetch_tick_timestamps(app_symbol.lower(), since_epoch * 1000, now_ms)
+    if ticks_ms is None:
+        return None
+    return len(ticks_ms)
 
 
 class DerivProvider:

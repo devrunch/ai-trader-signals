@@ -11,7 +11,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pandas as pd
 import pytest
 
-from app.market.providers.deriv_provider import DerivProvider, KNOWN_PAIRS, deriv_symbol_for
+from app.market.providers.deriv_provider import (
+    DerivProvider,
+    KNOWN_PAIRS,
+    deriv_symbol_for,
+    tick_volume_since,
+)
 
 
 def _mock_connect(response: dict):
@@ -202,6 +207,53 @@ class TestGetHistoricalDfVolumeWiring:
 
         assert list(df["volume"]) == [7.0, 12.0]
         fake.assert_called_once_with("XAUUSD", 1786752000, 1786755600 + 3600, [1786752000, 1786755600])
+
+
+class TestTickVolumeSince:
+    """Powers the terminal's 5-second live-volume poll for the still-forming
+    candle -- see market/router.py's /tick-volume/{symbol}."""
+
+    @pytest.mark.asyncio
+    async def test_counts_real_ticks_since_the_given_epoch(self):
+        with patch(
+            "app.market.providers.deriv_provider.dukascopy_bridge.fetch_tick_timestamps",
+            return_value=[1_000, 2_000, 3_000],
+        ) as fake:
+            count = await tick_volume_since("XAUUSD", 1786752000)
+
+        assert count == 3
+        args = fake.call_args[0]
+        assert args[0] == "xauusd"
+        assert args[1] == 1786752000 * 1000
+
+    @pytest.mark.asyncio
+    async def test_a_symbol_not_covered_by_deriv_returns_none_without_calling_dukascopy(self):
+        with patch(
+            "app.market.providers.deriv_provider.dukascopy_bridge.fetch_tick_timestamps",
+        ) as fake:
+            count = await tick_volume_since("RELIANCE", 1786752000)
+
+        assert count is None
+        fake.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_vendor_gap_returns_none_not_zero(self):
+        # None (couldn't ask) and 0 (asked, got nothing) are different
+        # answers -- collapsing them would show a confidently wrong "no
+        # trading activity" instead of an honest "couldn't check right now".
+        with patch(
+            "app.market.providers.deriv_provider.dukascopy_bridge.fetch_tick_timestamps",
+            return_value=None,
+        ):
+            assert await tick_volume_since("XAUUSD", 1786752000) is None
+
+    @pytest.mark.asyncio
+    async def test_a_genuinely_empty_tick_list_is_a_real_zero(self):
+        with patch(
+            "app.market.providers.deriv_provider.dukascopy_bridge.fetch_tick_timestamps",
+            return_value=[],
+        ):
+            assert await tick_volume_since("XAUUSD", 1786752000) == 0
 
 
 class TestSearch:

@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from app.market import calendar as market_calendar
 from app.market.live_ticks import LiveTicks
 from app.market.news import get_market_news_result
-from app.market.service import get_batch_quotes, get_historical, get_quote, search_symbols
+from app.market.service import get_batch_quotes, get_historical, get_quote, get_tick_volume, search_symbols
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +72,19 @@ async def historical(
     if not bars:
         raise HTTPException(status_code=404, detail=f"No historical data for {symbol}")
     return {"symbol": symbol.upper(), "exchange": exchange.upper(), "interval": interval, "bars": bars}
+
+
+@router.get("/tick-volume/{symbol}")
+async def tick_volume(
+    symbol: str,
+    since: int = Query(description="Unix epoch seconds -- real ticks counted from here to now"),
+):
+    """Live tick-count volume for the chart's still-forming candle, polled
+    every few seconds while it's open. FOREX/metals only -- `count: null`
+    means this symbol isn't Dukascopy-covered or the vendor call failed,
+    never a fabricated 0 (see get_tick_volume's own docstring)."""
+    count = await get_tick_volume(symbol.upper(), since)
+    return {"symbol": symbol.upper(), "since": since, "count": count}
 
 
 @router.post("/quotes/batch")
