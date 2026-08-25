@@ -34,27 +34,17 @@ _SCRIPT = _BRIDGE_DIR / "get_ticks.mjs"
 _VENDOR_ERRORS = (asyncio.TimeoutError, OSError, ValueError, TypeError, KeyError)
 
 
-async def fetch_tick_timestamps(instrument: str, from_ms: int, to_ms: int, timeout_s: float = 15.0) -> list[int] | None:
-    """Raw tick epoch-milliseconds for `instrument` in [from_ms, to_ms), or
-    None on any failure -- a real vendor gap and a subprocess/parse error
-    are both "we don't have this," not different cases the caller needs to
-    tell apart.
-
-    Dukascopy's own publish lag (confirmed live: ~15-20 minutes behind
-    real time) means a range reaching up to "now" will come back missing
-    its most recent stretch -- not a bug here, the caller's bucketing
-    already treats an uncovered candle as 0.0, the same honest fallback
-    used everywhere else in this app for a window a vendor hasn't
-    published yet.
-    """
-    payload = json.dumps({"instrument": instrument, "fromMs": from_ms, "toMs": to_ms})
+async def _run_bridge(payload: dict, instrument: str, timeout_s: float):
+    """Shared subprocess plumbing for every get_ticks.mjs call -- spawn,
+    write the payload to stdin, parse stdout as JSON, degrade to None on
+    any failure. `instrument` is only for the warning/exception logs."""
     try:
         proc = await asyncio.create_subprocess_exec(
             "node", str(_SCRIPT),
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             cwd=str(_BRIDGE_DIR),
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(payload.encode()), timeout=timeout_s)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(json.dumps(payload).encode()), timeout=timeout_s)
         if proc.returncode != 0:
             logger.warning(
                 "dukascopy bridge exited %s for %s: %s",
@@ -68,3 +58,34 @@ async def fetch_tick_timestamps(instrument: str, from_ms: int, to_ms: int, timeo
     except Exception:
         logger.exception("Unexpected error calling dukascopy bridge for %s", instrument)
         return None
+
+
+async def fetch_tick_timestamps(instrument: str, from_ms: int, to_ms: int, timeout_s: float = 15.0) -> list[int] | None:
+    """Raw tick epoch-milliseconds for `instrument` in [from_ms, to_ms), or
+    None on any failure -- a real vendor gap and a subprocess/parse error
+    are both "we don't have this," not different cases the caller needs to
+    tell apart.
+
+    Dukascopy's own publish lag (confirmed live: ~15-20 minutes behind
+    real time) means a range reaching up to "now" will come back missing
+    its most recent stretch -- not a bug here, the caller's bucketing
+    already treats an uncovered candle as 0.0, the same honest fallback
+    used everywhere else in this app for a window a vendor hasn't
+    published yet.
+    """
+    return await _run_bridge({"instrument": instrument, "fromMs": from_ms, "toMs": to_ms}, instrument, timeout_s)
+
+
+async def fetch_ticks(instrument: str, from_ms: int, to_ms: int, timeout_s: float = 15.0) -> list[dict] | None:
+    """Real ticks with price for `instrument` in [from_ms, to_ms) -- each
+    `{"t": epoch_ms, "p": mid_price}`, mid being Dukascopy's own bid/ask
+    average (a tick here is a quote update, not a single-sided trade
+    print). Volume Footprint/TPO's own data source (see
+    chart-types/footprint.ts and tpo.ts) -- everything else in this app
+    only ever needed tick COUNTS (fetch_tick_timestamps above), never
+    price, until those two. Same None-on-any-failure contract as
+    fetch_tick_timestamps, including the same ~15-20 minute publish lag.
+    """
+    return await _run_bridge(
+        {"instrument": instrument, "fromMs": from_ms, "toMs": to_ms, "includePrice": True}, instrument, timeout_s,
+    )

@@ -8,10 +8,17 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from app.market.providers.deriv_provider import tick_volume_since
+from app.market.providers.deriv_provider import deriv_symbol_for, tick_volume_since
+from app.market.providers.dukascopy_bridge import fetch_ticks
 from app.market.providers.registry import market_data_router
 
 logger = logging.getLogger(__name__)
+
+# Volume Footprint/TPO only need whatever's currently visible on the chart,
+# not the whole loaded history -- bounding the window keeps a single
+# request from turning into a multi-hour Dukascopy backfill. Mirrors the
+# same reasoning as MAX_TICK_VOLUME_LOOKBACK_SECONDS on the api-repo side.
+MAX_TICKS_WINDOW_SECONDS = 4 * 60 * 60
 
 
 async def get_quote(symbol: str, exchange: str = "NSE") -> dict | None:
@@ -26,6 +33,19 @@ async def get_tick_volume(symbol: str, since_epoch: int) -> int | None:
     None for anything else, or a real vendor gap -- see tick_volume_since's
     own docstring for why that must not collapse to 0."""
     return await tick_volume_since(symbol, since_epoch)
+
+
+async def get_ticks(symbol: str, since_epoch: int, until_epoch: int) -> list[dict] | None:
+    """Real ECN ticks (mid price) for Volume Footprint/TPO -- FOREX/metals
+    only (Dukascopy); None for anything else, a window that's too wide, or
+    a real vendor gap. Never a fabricated/interpolated tick list -- a chart
+    type built on invented intrabar prices would be worse than no chart
+    type at all."""
+    if deriv_symbol_for(symbol) is None:
+        return None
+    if until_epoch - since_epoch > MAX_TICKS_WINDOW_SECONDS or until_epoch <= since_epoch:
+        return None
+    return await fetch_ticks(symbol.lower(), since_epoch * 1000, until_epoch * 1000)
 
 
 async def search_symbols(query: str, limit: int = 8) -> list[dict]:

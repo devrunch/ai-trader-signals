@@ -70,3 +70,28 @@ class TestFetchTickTimestamps:
     async def test_spawn_failure_degrades_to_none_not_a_crash(self):
         with patch("app.market.providers.dukascopy_bridge.asyncio.create_subprocess_exec", side_effect=OSError("node not found")):
             assert await dukascopy_bridge.fetch_tick_timestamps("xauusd", 1000000, 2000000) is None
+
+
+class TestFetchTicks:
+    """fetch_ticks -- Volume Footprint/TPO's own data source, the only
+    caller that needs real tick PRICE, not just a count. Shares
+    fetch_tick_timestamps' own error-path plumbing (_run_bridge), so this
+    only covers what's actually different: the request/response shape."""
+
+    @pytest.mark.asyncio
+    async def test_a_real_response_returns_price_and_timestamp_per_tick(self):
+        proc = _mock_process(b'[{"t": 1000123, "p": 2650.5}, {"t": 1000456, "p": 2650.6}]')
+        with patch("app.market.providers.dukascopy_bridge.asyncio.create_subprocess_exec", return_value=proc) as fake:
+            result = await dukascopy_bridge.fetch_ticks("xauusd", 1000000, 2000000)
+
+        assert result == [{"t": 1000123, "p": 2650.5}, {"t": 1000456, "p": 2650.6}]
+        assert fake.call_args.args == ("node", str(dukascopy_bridge._SCRIPT))
+        import json
+        sent_payload = json.loads(proc.communicate.call_args.args[0])
+        assert sent_payload == {"instrument": "xauusd", "fromMs": 1000000, "toMs": 2000000, "includePrice": True}
+
+    @pytest.mark.asyncio
+    async def test_a_vendor_gap_degrades_to_none_same_as_fetch_tick_timestamps(self):
+        proc = _mock_process(b"", stderr=b"no data", returncode=1)
+        with patch("app.market.providers.dukascopy_bridge.asyncio.create_subprocess_exec", return_value=proc):
+            assert await dukascopy_bridge.fetch_ticks("xauusd", 1000000, 2000000) is None

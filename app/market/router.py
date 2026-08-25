@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from app.market import calendar as market_calendar
 from app.market.live_ticks import LiveTicks
 from app.market.news import get_market_news_result
-from app.market.service import get_batch_quotes, get_historical, get_quote, get_tick_volume, search_symbols
+from app.market.service import get_batch_quotes, get_historical, get_quote, get_tick_volume, get_ticks, search_symbols
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +85,22 @@ async def tick_volume(
     never a fabricated 0 (see get_tick_volume's own docstring)."""
     count = await get_tick_volume(symbol.upper(), since)
     return {"symbol": symbol.upper(), "since": since, "count": count}
+
+
+@router.get("/ticks/{symbol}")
+async def ticks(
+    symbol: str,
+    since: int = Query(description="Unix epoch seconds"),
+    until: int = Query(description="Unix epoch seconds"),
+):
+    """Real ECN ticks (mid price) for Volume Footprint/TPO -- FOREX/metals
+    only, and only for whatever the chart currently has visible (see
+    get_ticks' own MAX_TICKS_WINDOW_SECONDS). `ticks: null` means this
+    symbol isn't Dukascopy-covered, the window was rejected, or the vendor
+    call failed -- the caller must not render an empty footprint as "no
+    trading happened," only as "couldn't check."""
+    result = await get_ticks(symbol.upper(), since, until)
+    return {"symbol": symbol.upper(), "since": since, "until": until, "ticks": result}
 
 
 @router.post("/quotes/batch")
