@@ -1,0 +1,8 @@
+{
+  "name": "dukascopy-bridge",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "dukascopy-node": "^1.50.0"
+  }
+}
