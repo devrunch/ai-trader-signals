@@ -133,7 +133,12 @@ async def generate(
     if isinstance(yf_news_result, BaseException):
         logger.exception("yfinance_headlines raised", exc_info=yf_news_result)
         yf_news_result = []
-    events = {"fred_releases": fred_result or [], "headlines": yf_news_result}
+    # fred_result stays None (not []) when FRED wasn't configured/reachable --
+    # collapsing it to [] here would make "couldn't check" indistinguishable
+    # from "checked, nothing new" for anything reading the stored brief
+    # document, the exact ambiguity _events_block() exists to avoid in the
+    # LLM's own prompt.
+    events = {"fred_releases": fred_result, "headlines": yf_news_result}
 
     narrative = await _narrative(llm, cues, candidates, events)
 
