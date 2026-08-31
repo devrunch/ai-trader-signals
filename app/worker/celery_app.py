@@ -68,6 +68,16 @@ celery.conf.update(
             "task": "app.worker.tasks.generate_morning_brief",
             "schedule": crontab(minute="30", hour="6", day_of_week="mon-fri"),
         },
+        # Second run of the same brief, ahead of the US open (~19:00 IST /
+        # 09:30 ET) rather than the Indian one -- picks up the day's own US
+        # session macro releases (US data mostly prints 18:00-19:30 IST) that
+        # the 06:30 run is too early for. Same task, same "real numbers only"
+        # narrative -- just a second real vantage point on the same day, not
+        # a different kind of brief.
+        "evening-brief": {
+            "task": "app.worker.tasks.generate_morning_brief",
+            "schedule": crontab(minute="0", hour="18", day_of_week="mon-fri"),
+        },
         # Kite Connect's access_token expires ~6am IST. 06:00 is ahead of the
         # 06:30 morning brief and well ahead of the 09:15 open — see the
         # design spec for why a failed refresh here is not an emergency (the

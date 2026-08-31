@@ -94,6 +94,11 @@ class Settings(BaseSettings):
     # Tavily (tavily.com) -- the chat agent's web_search tool. Unset = the
     # tool returns a clear "not configured" error rather than crashing the turn.
     tavily_api_key: str = ""
+    # FRED (fred.stlouisfed.org) -- free, official US Federal Reserve economic
+    # data. Register at https://fred.stlouisfed.org/docs/api/api_key.html.
+    # Powers macro_events.py's real CPI/NFP/Fed-rate release data for the
+    # morning brief's causal narrative (see brief.py).
+    fred_api_key: str = ""
     # Zerodha Kite Connect — real NSE/BSE market data. ZERODHA_USER_ID/PASSWORD/
     # TOTP_SECRET are only used by the daily scripted login (see
     # app/market/providers/kite_auth.py); ZERODHA_API_KEY/SECRET are also

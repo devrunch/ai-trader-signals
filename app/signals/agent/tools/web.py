@@ -151,23 +151,22 @@ async def fetch_url(ctx: ToolContext, args: dict) -> dict:
     return {"url": result["final_url"], "text": text[:MAX_TEXT_CHARS], "truncated": truncated}
 
 
-async def web_search(ctx: ToolContext, args: dict) -> dict:
-    query = str(args.get("query") or "").strip()
-    if not query:
-        raise ValueError("query is required")
-    max_results = min(int(args.get("max_results") or 5), MAX_SEARCH_RESULTS)
-
-    settings = ctx.settings or get_settings()
-    api_key = getattr(settings, "tavily_api_key", "")
+async def tavily_search(api_key: str, query: str, max_results: int = 5) -> dict:
+    """The raw Tavily call, independent of the chat agent's ToolContext --
+    shared by the web_search tool below and app/market/macro_events.py's
+    own Reddit-flavored searches (twice-daily brief + the odd-hour crowd-
+    sentiment check), so there is exactly one place that knows Tavily's
+    request/response shape. Callers pass their own `api_key` rather than
+    reaching into settings themselves, since macro_events.py's caller
+    (a Celery task, not a chat turn) has no ToolContext to read one from."""
     if not api_key:
         return {"error": "Web search is not configured (no Tavily API key set)."}
-
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(TAVILY_SEARCH_URL, json={
                 "api_key": api_key,
                 "query": query,
-                "max_results": max_results,
+                "max_results": min(max_results, MAX_SEARCH_RESULTS),
                 "include_answer": True,
             })
             resp.raise_for_status()
@@ -181,6 +180,17 @@ async def web_search(ctx: ToolContext, args: dict) -> dict:
         for r in data.get("results", [])
     ]
     return {"answer": data.get("answer"), "results": results, "count": len(results)}
+
+
+async def web_search(ctx: ToolContext, args: dict) -> dict:
+    query = str(args.get("query") or "").strip()
+    if not query:
+        raise ValueError("query is required")
+    max_results = int(args.get("max_results") or 5)
+
+    settings = ctx.settings or get_settings()
+    api_key = getattr(settings, "tavily_api_key", "")
+    return await tavily_search(api_key, query, max_results)
 
 
 TOOLS: dict[str, Handler] = {

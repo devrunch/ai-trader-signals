@@ -19,7 +19,7 @@ import httpx
 
 from app.config import get_settings
 from app.llm.client import LlmClient, get_llm
-from app.market import global_cues
+from app.market import global_cues, macro_events
 from app.market.global_cues import IST
 from app.signals import prompts
 
@@ -63,6 +63,16 @@ async def generate(
 
     cues = await global_cues.collect()
     summary = cues["summary"]
+
+    # The WHY behind the cues above -- real US macro releases (FRED) and
+    # general macro headlines (yfinance), run concurrently with the
+    # per-candidate work below rather than blocking ahead of it. Both
+    # degrade to an empty list on any failure (no key, vendor down) rather
+    # than raising -- a missing "why" is a worse brief, not a broken one.
+    events_task = asyncio.gather(
+        macro_events.fred_releases(), macro_events.yfinance_headlines(),
+        return_exceptions=True,
+    )
 
     # Which overnight driver actually moved enough to matter today?
     movers = _dominant_drivers(cues["cues"], settings.brief_driver_move_threshold)
@@ -116,7 +126,16 @@ async def generate(
     candidates.sort(key=lambda c: -_rank_score(c))
     candidates = _cap_per_sector(candidates, settings.brief_max_per_sector)[:max_candidates]
 
-    narrative = await _narrative(llm, cues, candidates)
+    fred_result, yf_news_result = await events_task
+    if isinstance(fred_result, BaseException):
+        logger.exception("fred_releases raised", exc_info=fred_result)
+        fred_result = None
+    if isinstance(yf_news_result, BaseException):
+        logger.exception("yfinance_headlines raised", exc_info=yf_news_result)
+        yf_news_result = []
+    events = {"fred_releases": fred_result or [], "headlines": yf_news_result}
+
+    narrative = await _narrative(llm, cues, candidates, events)
 
     return {
         "date": datetime.now(IST).strftime("%Y-%m-%d"),
@@ -135,6 +154,7 @@ async def generate(
             "asia_avg_pct": summary["asia_avg_pct"],
         },
         "narrative": narrative,
+        "macro_events": events,
         "candidates": candidates,
         "universe_size": len(universe),
         "disclaimer": (
@@ -328,7 +348,33 @@ def _shared_drivers(candidates: list[dict]) -> str:
     )
 
 
-async def _narrative(llm: LlmClient, cues: dict, candidates: list[dict]) -> str:
+def _events_block(events: dict) -> str:
+    """Real material for the WHY behind the overnight cues -- absent
+    entirely (not "none found") when a source couldn't be checked at all
+    (no key, vendor down), so the prompt never implies a quiet macro window
+    that was actually just an unreachable one."""
+    releases = events.get("fred_releases")
+    headlines = events.get("headlines") or []
+    parts: list[str] = []
+
+    if releases is None:
+        parts.append("US MACRO RELEASES: not available this run (FRED unreachable or unconfigured).")
+    elif releases:
+        lines = "\n".join(
+            f"  {r['name']}: {r['actual']} (prior {r['prior']}), as of {r['date']}" for r in releases
+        )
+        parts.append(f"NEW US MACRO RELEASES SINCE THE LAST BRIEF:\n{lines}")
+    else:
+        parts.append("US MACRO RELEASES: none newly published since the last brief.")
+
+    if headlines:
+        lines = "\n".join(f"  {h['title']} ({h.get('publisher') or 'unknown source'})" for h in headlines[:8])
+        parts.append(f"RECENT MACRO/GOLD/USD HEADLINES:\n{lines}")
+
+    return "\n\n".join(parts)
+
+
+async def _narrative(llm: LlmClient, cues: dict, candidates: list[dict], events: dict | None = None) -> str:
     """LLM writes the connecting prose. It is given the computed numbers and
     explicitly told not to invent any."""
     s = cues["summary"]
@@ -343,6 +389,7 @@ async def _narrative(llm: LlmClient, cues: dict, candidates: list[dict]) -> str:
     ) or "  (no candidates cleared the filters today)"
 
     shared = _shared_drivers(candidates)
+    events_block = _events_block(events) if events else ""
 
     prompt = (
         "Write the opening narrative for a pre-market trading brief for Indian markets.\n\n"
@@ -351,10 +398,14 @@ async def _narrative(llm: LlmClient, cues: dict, candidates: list[dict]) -> str:
         f"(uncalibrated — describes how strongly the cues agree, NOT a hit rate), "
         f"US avg {s['us_avg_pct']}%, Asia avg {s['asia_avg_pct']}%\n"
         f"NOTES: {'; '.join(s['notes']) or 'none'}\n\n"
-        f"CANDIDATES:\n{cand_lines}\n\n"
+        + (f"{events_block}\n\n" if events_block else "")
+        + f"CANDIDATES:\n{cand_lines}\n\n"
         + (f"CORRELATION WARNING: {shared}\n\n" if shared else "")
         + "Write 3-4 sentences a trader reads in under 20 seconds: what happened overnight, "
         "what it implies for the Indian open, and where the opportunity or risk sits. "
+        + ("If a macro release above plausibly explains one of the overnight cue moves, say so "
+           "explicitly (e.g. \"CPI printed above the prior reading, which likely pushed the dollar "
+           "and weighed on...\") — connect the release to the cue, don't just list both separately. " if events_block else "")
         + ("State plainly that the correlated candidates above are ONE bet, not several — "
            "a user who takes all of them is concentrated, not diversified. " if shared else "")
         + "Use ONLY the numbers above — invent nothing. Do not promise returns or certainty. "
