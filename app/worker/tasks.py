@@ -209,6 +209,51 @@ def generate_morning_brief():
         return {"error": True}
 
 
+@celery.task(name="app.worker.tasks.run_drift_check")
+def run_drift_check():
+    """Hourly market-drift check -- see app/market/drift_check.py's own docs."""
+    from app.market import alerts_publish, drift_check
+
+    async def run():
+        alert = await drift_check.check()
+        if alert is not None:
+            await alerts_publish.publish(alert)
+        return alert
+
+    try:
+        alert = run_async(run())
+        if alert is None:
+            return {"alert": False}
+        logger.info("Drift alert: %s", alert["title"])
+        return {"alert": True, "title": alert["title"]}
+    except Exception:
+        logger.exception("Drift check failed")
+        return {"error": True}
+
+
+@celery.task(name="app.worker.tasks.run_reddit_sentiment")
+def run_reddit_sentiment():
+    """Odd-hour Reddit-flavored crowd-sentiment check -- see
+    app/market/reddit_sentiment.py's own docs."""
+    from app.market import alerts_publish, reddit_sentiment
+
+    async def run():
+        alert = await reddit_sentiment.check()
+        if alert is not None:
+            await alerts_publish.publish(alert)
+        return alert
+
+    try:
+        alert = run_async(run())
+        if alert is None:
+            return {"alert": False}
+        logger.info("Reddit sentiment alert: %s", alert["title"])
+        return {"alert": True, "title": alert["title"]}
+    except Exception:
+        logger.exception("Reddit sentiment check failed")
+        return {"error": True}
+
+
 @celery.task(name="app.worker.tasks.refresh_zerodha_session")
 def refresh_zerodha_session():
     """Daily Kite Connect login — 06:00 IST via Celery beat.

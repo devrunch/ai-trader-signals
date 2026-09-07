@@ -86,5 +86,18 @@ celery.conf.update(
             "task": "app.worker.tasks.refresh_zerodha_session",
             "schedule": crontab(minute="0", hour="6"),
         },
+        # Every hour, all day -- drift_check.check() is cheap on a quiet hour
+        # (one real fetch, no LLM call, no alert), so there's no need to
+        # restrict this to market hours the way the screener is.
+        "drift-check": {
+            "task": "app.worker.tasks.run_drift_check",
+            "schedule": crontab(minute="30"),
+        },
+        # Odd hours only (1,3,5...23 IST) -- keeps Tavily's free-credit usage
+        # down, per the explicit call to ration it across callers.
+        "reddit-sentiment": {
+            "task": "app.worker.tasks.run_reddit_sentiment",
+            "schedule": crontab(minute="45", hour="1,3,5,7,9,11,13,15,17,19,21,23"),
+        },
     },
 )

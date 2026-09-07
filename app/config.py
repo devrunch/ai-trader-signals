@@ -179,6 +179,12 @@ class Settings(BaseSettings):
     # one bet, not five, and they lose together.
     brief_max_per_sector: int = 1
 
+    # ---- Alerts (hourly drift check + odd-hour Reddit sentiment) ----
+    # % move since the LAST HOURLY CHECK, not brief_driver_move_threshold's
+    # full-overnight-session move -- a much smaller bar makes sense for a
+    # 1-hour cadence.
+    drift_check_move_threshold: float = 0.5
+
     # ---- Concurrency ----
     # Bounded, not unbounded — yfinance rate-limits aggressively.
     screener_concurrency: int = 5
