@@ -1,15 +1,21 @@
 """
-News feed with FinBERT sentiment scoring via HF Inference API.
-No local torch/transformers — calls the free HF hosted inference endpoint.
+News feed with FinBERT sentiment scoring (HF Inference API) and real
+per-headline stock-impact analysis (LLM, one batched call for the whole
+page) -- see _analyze_impacts' own docstring for why this replaced a naive
+keyword match against a fixed ticker shortlist.
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from datetime import UTC, datetime
 
 import httpx
 
 from app.config import get_settings
+from app.llm.client import LlmClient, get_llm
+from app.signals.prompts import extract_json_text
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +31,17 @@ INDIA_MARKET_QUERY = (
     "NSE OR BSE OR Nifty OR Sensex OR \"Indian stock\" OR SEBI OR "
     "\"Dalal Street\" OR RBI OR \"equity market\""
 )
+
+NEWS_IMPACT_SYSTEM = (
+    "You are a markets analyst. Never invent a connection that isn't really "
+    "there -- most headlines affect no tradeable stock or instrument at all, "
+    "and an empty list is the correct, honest answer for those, not a guess."
+)
+
+# One entry per article costs real output tokens (symbol + direction + a
+# reason each) -- generous enough for a full page of headlines with real
+# impacts, without leaving the call effectively uncapped.
+IMPACT_MAX_TOKENS = 2500
 
 
 async def _fetch_newsapi(query: str, page_size: int = 20) -> list[dict]:
@@ -87,30 +104,114 @@ async def _hf_sentiment_batch(texts: list[str]) -> list[tuple[str, float]] | Non
         return None
 
 
-def _extract_symbols(text: str) -> list[str]:
-    """Naive keyword match for common NSE tickers mentioned in a headline."""
-    KNOWN = [
-        "RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS", "WIPRO",
-        "TATAMOTORS", "TATASTEEL", "AXISBANK", "SBIN", "BAJFINANCE",
-        "MARUTI", "HINDUNILVR", "ASIANPAINT", "LT", "SUNPHARMA",
-        "NIFTY", "SENSEX", "BANKNIFTY",
-    ]
-    upper = text.upper()
-    return [s for s in KNOWN if s in upper]
+def _parse_impact_response(raw_text: str, n: int) -> list[list[dict]] | None:
+    """Parses the LLM's JSON array into one clean impacts list per article,
+    in order. Any malformed entry (missing symbol, a direction other than
+    up/down, wrong shape) is dropped rather than guessed at -- a partially-
+    wrong impact list is worse than a shorter, honest one. Returns None
+    (not a partial result) if the response isn't even the right SHAPE
+    (not a JSON array, or the wrong length) -- that means the whole batch
+    failed to analyze, not that zero articles had impacts."""
+    try:
+        parsed = json.loads(extract_json_text(raw_text))
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(parsed, list) or len(parsed) != n:
+        logger.warning(
+            "News impact analysis returned %s entries for %d articles — discarding",
+            len(parsed) if isinstance(parsed, list) else type(parsed).__name__, n,
+        )
+        return None
+
+    results: list[list[dict]] = []
+    for entry in parsed:
+        affected = entry.get("affected") if isinstance(entry, dict) else None
+        clean: list[dict] = []
+        if isinstance(affected, list):
+            for item in affected:
+                if not isinstance(item, dict):
+                    continue
+                symbol = item.get("symbol")
+                direction = item.get("direction")
+                if not symbol or direction not in ("up", "down"):
+                    continue
+                clean.append({
+                    "symbol": str(symbol).strip().upper(),
+                    "direction": direction,
+                    "reason": str(item.get("reason") or "").strip()[:200],
+                })
+        results.append(clean)
+    return results
+
+
+async def _analyze_impacts(llm: LlmClient, articles: list[dict]) -> list[list[dict]] | None:
+    """Real per-headline stock/instrument impact, one batched LLM call for
+    the whole page -- not the keyword match this replaced (`_extract_symbols`,
+    a plain substring check against a hardcoded 17-ticker shortlist: blind to
+    anything outside that list, and "mentions the ticker" is not the same
+    question as "this headline plausibly moves this instrument"). The model
+    names real symbols freely, not constrained to any fixed universe -- a
+    hardcoded shortlist here would just be the same arbitrariness one level
+    up.
+
+    Returns None (not a list of empty lists) when the WHOLE batch could not
+    be analyzed -- no LLM configured, the call failed, the response was the
+    wrong shape. Callers must not read that as "no headline had a real
+    impact today"; see get_market_news_result's own docs for how it's
+    surfaced.
+    """
+    if not articles:
+        return []
+    numbered = "\n".join(
+        f"{i}. {a.get('title') or ''} -- {a.get('description') or ''}"
+        for i, a in enumerate(articles)
+    )
+    prompt = (
+        "For each numbered headline below, name the real, tradeable stocks or "
+        "instruments it plausibly affects (their real ticker or a clear, "
+        "specific name -- not limited to any fixed list), the direction each "
+        "would plausibly move (\"up\" or \"down\"), and one short reason "
+        "grounded in the headline itself. Most headlines affect nothing "
+        "tradeable -- return an empty \"affected\" list for those rather than "
+        "forcing a connection.\n\n"
+        f"{numbered}\n\n"
+        "Respond with ONLY a JSON array, exactly one object per headline, in "
+        "the same order, no other text:\n"
+        "[{\"affected\": [{\"symbol\": \"RELIANCE\", \"direction\": \"down\", "
+        "\"reason\": \"...\"}]}, ...]"
+    )
+    try:
+        resp = await asyncio.to_thread(
+            llm.chat,
+            temperature=0, max_tokens=IMPACT_MAX_TOKENS,
+            messages=[
+                {"role": "system", "content": NEWS_IMPACT_SYSTEM},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        return _parse_impact_response(resp.choices[0].message.content or "", len(articles))
+    except Exception as e:
+        logger.warning("News impact analysis failed: %s", e)
+        return None
 
 
 async def get_market_news_result(
-    symbols: list[str] | None = None, page_size: int = 15
+    symbols: list[str] | None = None, page_size: int = 15, llm: LlmClient | None = None,
 ) -> dict:
     """
-    Fetch market news and score sentiment, reporting what failed.
+    Fetch market news, score sentiment, and analyze real per-headline stock
+    impact -- reporting what failed at each stage rather than silently
+    degrading to something that looks like a normal result.
 
     symbols: optional list to narrow query (e.g. ["RELIANCE", "INFY"])
 
-    Returns `{articles, count, degraded, degraded_reason}`. `degraded` is the
-    point of this function: both failure modes below used to return a plain
-    list — empty for a news outage, NEUTRAL-scored for a sentiment outage — and
-    the caller could not tell either apart from a quiet news day.
+    Returns `{articles, count, degraded, degraded_reason}`. Both the
+    sentiment and impact pipelines can fail independently of the news fetch
+    itself and of each other -- each article carries its own
+    `sentimentAvailable` (already existed) and `impacts: null` (new) so a
+    caller can tell "analyzed, found nothing" from "couldn't analyze",
+    which used to look identical for both sentiment (NEUTRAL either way)
+    and impact (empty list either way).
     """
     if symbols:
         query = " OR ".join(symbols[:5])
@@ -127,19 +228,27 @@ async def get_market_news_result(
         return {"articles": [], "count": 0, "degraded": True, "degraded_reason": "news_unavailable"}
 
     texts = [f"{a.get('title') or ''}. {a.get('description') or ''}" for a in articles]
-    scored = await _hf_sentiment_batch(texts)
+    llm = llm or get_llm()
+    sentiment_task = _hf_sentiment_batch(texts)
+    impacts_task = _analyze_impacts(llm, articles)
+    scored, impacts_by_article = await asyncio.gather(sentiment_task, impacts_task)
+
     sentiment_ok = scored is not None
     sentiments: list[tuple[str, float]] = scored if scored is not None else [("NEUTRAL", 0.0)] * len(texts)
+    impacts_ok = impacts_by_article is not None
+    impacts_list: list[list[dict] | None] = (
+        list(impacts_by_article) if impacts_by_article is not None else [None] * len(articles)
+    )
 
     results = []
-    # strict=True: `_hf_sentiment_batch` already rejects a length mismatch, and
-    # the neutral fallback is built from `texts`, so the two are the same length
-    # by construction. If that ever stops being true the scores would be
-    # silently attached to the wrong headlines.
-    for a, (label, score) in zip(articles, sentiments, strict=True):
+    # strict=True: both fallback lists above are built to match `articles`'
+    # own length by construction (or `_hf_sentiment_batch`/_analyze_impacts
+    # already rejected a mismatched batch and returned None). If that ever
+    # stops being true, scores/impacts would be silently attached to the
+    # wrong headline.
+    for a, (label, score), impacts in zip(articles, sentiments, impacts_list, strict=True):
         headline    = a.get("title") or ""
         description = a.get("description") or ""
-        text        = f"{headline}. {description}"
 
         published = a.get("publishedAt", "")
         try:
@@ -162,14 +271,28 @@ async def get_market_news_result(
             # False means the NEUTRAL above is "we could not score it", not
             # "FinBERT read it as neutral".
             "sentimentAvailable": sentiment_ok,
-            "symbols": _extract_symbols(text),
+            # Real per-symbol impact from the LLM analysis above -- null
+            # (not []) means the batch couldn't be analyzed at all, same
+            # "unavailable, not empty" contract sentimentAvailable already
+            # gives sentiment.
+            "impacts": impacts,
         })
+
+    degraded = not sentiment_ok or not impacts_ok
+    if not sentiment_ok and not impacts_ok:
+        degraded_reason = "sentiment_and_impact_unavailable"
+    elif not sentiment_ok:
+        degraded_reason = "sentiment_unavailable"
+    elif not impacts_ok:
+        degraded_reason = "impact_unavailable"
+    else:
+        degraded_reason = None
 
     return {
         "articles": results,
         "count": len(results),
-        "degraded": not sentiment_ok,
-        "degraded_reason": None if sentiment_ok else "sentiment_unavailable",
+        "degraded": degraded,
+        "degraded_reason": degraded_reason,
     }
 
 

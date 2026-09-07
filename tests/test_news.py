@@ -1,0 +1,166 @@
+"""
+News feed: sentiment (existing, unaffected here) + real per-headline stock
+impact analysis (new -- replaces the old `_extract_symbols` keyword match).
+Mocks NewsAPI/HF's own HTTP calls and the LLM client, same fake shapes
+test_orchestrator.py already established for LlmClient.
+"""
+from __future__ import annotations
+
+import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from app.market import news
+
+
+def _response(content: str | None = None):
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+
+
+class FakeLlm:
+    def __init__(self, *responses):
+        self.queue = list(responses)
+        self.calls: list[dict] = []
+
+    def chat(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.queue.pop(0) if len(self.queue) > 1 else self.queue[0]
+
+
+def _article(title="Headline", description="Description"):
+    return {"title": title, "description": description, "url": "https://example.com/a", "publishedAt": "2026-01-01T00:00:00Z",
+            "source": {"name": "Reuters"}}
+
+
+class TestParseImpactResponse:
+    def test_a_clean_valid_response_parses_as_is(self):
+        raw = json.dumps([
+            {"affected": [{"symbol": "reliance", "direction": "down", "reason": "Crude spike squeezes refining margins."}]},
+            {"affected": []},
+        ])
+        result = news._parse_impact_response(raw, n=2)
+        assert result == [
+            [{"symbol": "RELIANCE", "direction": "down", "reason": "Crude spike squeezes refining margins."}],
+            [],
+        ]
+
+    def test_a_markdown_fenced_response_is_unwrapped_first(self):
+        raw = "```json\n" + json.dumps([{"affected": []}]) + "\n```"
+        assert news._parse_impact_response(raw, n=1) == [[]]
+
+    def test_malformed_individual_entries_are_dropped_not_guessed_at(self):
+        raw = json.dumps([{
+            "affected": [
+                {"symbol": "TCS", "direction": "up", "reason": "Real one."},
+                {"symbol": "", "direction": "up", "reason": "No symbol -- dropped."},
+                {"symbol": "INFY", "direction": "sideways", "reason": "Not up/down -- dropped."},
+                "not even an object",
+            ],
+        }])
+        result = news._parse_impact_response(raw, n=1)
+        assert result == [[{"symbol": "TCS", "direction": "up", "reason": "Real one."}]]
+
+    def test_non_json_text_returns_none_not_an_empty_list(self):
+        assert news._parse_impact_response("I cannot help with that.", n=3) is None
+
+    def test_wrong_length_array_returns_none(self):
+        # The model dropped or merged an entry -- can't trust the alignment
+        # to the original headline order, so the whole batch is discarded
+        # rather than silently misattributed.
+        raw = json.dumps([{"affected": []}, {"affected": []}])
+        assert news._parse_impact_response(raw, n=3) is None
+
+    def test_a_reason_longer_than_200_chars_is_truncated_not_dropped(self):
+        long_reason = "x" * 500
+        raw = json.dumps([{"affected": [{"symbol": "TCS", "direction": "up", "reason": long_reason}]}])
+        result = news._parse_impact_response(raw, n=1)
+        assert len(result[0][0]["reason"]) == 200
+
+
+class TestAnalyzeImpacts:
+    @pytest.mark.asyncio
+    async def test_no_articles_short_circuits_without_calling_the_llm(self):
+        llm = FakeLlm()
+        result = await news._analyze_impacts(llm, [])
+        assert result == []
+        assert llm.calls == []
+
+    @pytest.mark.asyncio
+    async def test_a_real_batched_call_covers_every_article_in_order(self):
+        articles = [_article("CPI hotter than expected"), _article("Local bakery wins award")]
+        llm = FakeLlm(_response(json.dumps([
+            {"affected": [{"symbol": "XAUUSD", "direction": "down", "reason": "Hot CPI strengthens USD, pressuring gold."}]},
+            {"affected": []},
+        ])))
+        result = await news._analyze_impacts(llm, articles)
+
+        assert result == [
+            [{"symbol": "XAUUSD", "direction": "down", "reason": "Hot CPI strengthens USD, pressuring gold."}],
+            [],
+        ]
+        # One call for the WHOLE batch, not one per article.
+        assert len(llm.calls) == 1
+        prompt = llm.calls[0]["messages"][1]["content"]
+        assert "CPI hotter than expected" in prompt
+        assert "Local bakery wins award" in prompt
+
+    @pytest.mark.asyncio
+    async def test_llm_failure_degrades_to_none_not_a_crash(self):
+        class BrokenLlm:
+            def chat(self, **kwargs):
+                raise RuntimeError("upstream down")
+        result = await news._analyze_impacts(BrokenLlm(), [_article()])
+        assert result is None
+
+
+class TestGetMarketNewsResult:
+    @pytest.mark.asyncio
+    async def test_real_impacts_and_sentiment_both_land_on_the_right_article(self):
+        articles = [_article("Rate cut expected"), _article("Nothing special")]
+        llm = FakeLlm(_response(json.dumps([
+            {"affected": [{"symbol": "NIFTY", "direction": "up", "reason": "Cheaper credit lifts equities."}]},
+            {"affected": []},
+        ])))
+        with patch("app.market.news._fetch_newsapi", new=AsyncMock(return_value=articles)), \
+             patch("app.market.news._hf_sentiment_batch", new=AsyncMock(return_value=[("POSITIVE", 0.9), ("NEUTRAL", 0.0)])):
+            result = await news.get_market_news_result(llm=llm)
+
+        assert result["degraded"] is False
+        assert result["degraded_reason"] is None
+        a0, a1 = result["articles"]
+        assert a0["sentiment"] == "POSITIVE"
+        assert a0["impacts"] == [{"symbol": "NIFTY", "direction": "up", "reason": "Cheaper credit lifts equities."}]
+        assert a1["impacts"] == []
+
+    @pytest.mark.asyncio
+    async def test_impact_analysis_failing_alone_is_reported_distinctly_from_sentiment_failing(self):
+        articles = [_article()]
+        broken_llm = FakeLlm()  # never queued a response -- IndexError inside chat()
+        with patch("app.market.news._fetch_newsapi", new=AsyncMock(return_value=articles)), \
+             patch("app.market.news._hf_sentiment_batch", new=AsyncMock(return_value=[("POSITIVE", 0.5)])):
+            result = await news.get_market_news_result(llm=broken_llm)
+
+        assert result["degraded"] is True
+        assert result["degraded_reason"] == "impact_unavailable"
+        assert result["articles"][0]["impacts"] is None  # not [] -- "couldn't check", not "nothing found"
+        assert result["articles"][0]["sentimentAvailable"] is True
+
+    @pytest.mark.asyncio
+    async def test_both_pipelines_failing_is_reported_as_both(self):
+        articles = [_article()]
+        broken_llm = FakeLlm()
+        with patch("app.market.news._fetch_newsapi", new=AsyncMock(return_value=articles)), \
+             patch("app.market.news._hf_sentiment_batch", new=AsyncMock(return_value=None)):
+            result = await news.get_market_news_result(llm=broken_llm)
+
+        assert result["degraded_reason"] == "sentiment_and_impact_unavailable"
+        assert result["articles"][0]["impacts"] is None
+        assert result["articles"][0]["sentimentAvailable"] is False
+
+    @pytest.mark.asyncio
+    async def test_a_news_fetch_failure_still_returns_a_well_shaped_empty_result(self):
+        with patch("app.market.news._fetch_newsapi", new=AsyncMock(side_effect=RuntimeError("boom"))):
+            result = await news.get_market_news_result()
+        assert result == {"articles": [], "count": 0, "degraded": True, "degraded_reason": "news_unavailable"}
