@@ -78,13 +78,17 @@ celery.conf.update(
             "task": "app.worker.tasks.generate_morning_brief",
             "schedule": crontab(minute="0", hour="18", day_of_week="mon-fri"),
         },
-        # Every 15 min, all day -- moves the real NewsAPI/HF/LLM work off
-        # the request path (see run_news_analysis's own docs). NewsAPI's
-        # own free-tier articles are already ~24h delayed regardless of how
-        # often this polls, so 15 min is plenty fresh, not a compromise.
+        # Hourly, all day -- moves the real NewsAPI/HF/LLM work off the
+        # request path (see run_news_analysis's own docs). NewsAPI's free
+        # tier caps at 100 requests/day; a 15-min cadence would burn 96 of
+        # those on this alone, leaving almost no room for anything else.
+        # Hourly is 24/day -- and NewsAPI's own articles are already ~24h
+        # delayed regardless of how often this polls, so there's no real
+        # freshness lost. Different minute than drift-check (:30) to spread
+        # load across the hour rather than firing both at once.
         "news-analysis": {
             "task": "app.worker.tasks.run_news_analysis",
-            "schedule": crontab(minute="*/15"),
+            "schedule": crontab(minute="0"),
         },
         # Kite Connect's access_token expires ~6am IST. 06:00 is ahead of the
         # 06:30 morning brief and well ahead of the 09:15 open — see the

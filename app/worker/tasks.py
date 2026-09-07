@@ -185,8 +185,10 @@ def square_off_positions():
 
 @celery.task(name="app.worker.tasks.run_news_analysis")
 def run_news_analysis():
-    """News + sentiment + real per-headline stock impact -- every 15 min,
-    all day. Moves the real NewsAPI/HF/LLM work out of the request path:
+    """News + sentiment + real per-headline stock impact -- hourly, all
+    day (NewsAPI's free tier caps at 100 requests/day, so hourly rather
+    than every 15 min). Moves the real NewsAPI/HF/LLM work out of the
+    request path:
     the frontend now reads the stored latest result from ai-trader-api
     instead of triggering this analysis live on every page load, the same
     pipeline-then-read pattern the brief and the two alert tasks already
