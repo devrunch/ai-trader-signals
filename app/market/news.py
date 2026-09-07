@@ -51,10 +51,16 @@ NEWS_IMPACT_SYSTEM = (
 # for anything that doesn't fit rather than a forced wrong guess.
 ASSET_CLASSES = frozenset({"NSE", "BSE", "NASDAQ", "NYSE", "FOREX", "MCX", "CRYPTO", "OTHER"})
 
-# One entry per article costs real output tokens (symbol + direction + a
-# reason each) -- generous enough for a full page of headlines with real
-# impacts, without leaving the call effectively uncapped.
-IMPACT_MAX_TOKENS = 2500
+# One entry per article costs real output tokens (symbol + direction +
+# assetClass + a reason each). 2500 was sized for a mostly-India-equity feed
+# where few headlines had any real impact; broadening the default query to
+# include global macro/forex made real (multi-symbol) impacts common enough
+# per page that a 25-article batch routinely got truncated mid-array --
+# confirmed live ("News impact analysis returned 24 entries for 25
+# articles"), which discards the WHOLE batch since a short array can't be
+# trusted to still be in headline order. Not raised further than this
+# without also raising page_size, since the call still needs a real cap.
+IMPACT_MAX_TOKENS = 4096
 
 
 async def _fetch_newsapi(query: str, page_size: int = 20) -> list[dict]:
