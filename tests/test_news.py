@@ -37,14 +37,31 @@ def _article(title="Headline", description="Description"):
 class TestParseImpactResponse:
     def test_a_clean_valid_response_parses_as_is(self):
         raw = json.dumps([
-            {"affected": [{"symbol": "reliance", "direction": "down", "reason": "Crude spike squeezes refining margins."}]},
+            {"affected": [{"symbol": "reliance", "direction": "down", "assetClass": "NSE", "reason": "Crude spike squeezes refining margins."}]},
             {"affected": []},
         ])
         result = news._parse_impact_response(raw, n=2)
         assert result == [
-            [{"symbol": "RELIANCE", "direction": "down", "reason": "Crude spike squeezes refining margins."}],
+            [{"symbol": "RELIANCE", "direction": "down", "reason": "Crude spike squeezes refining margins.", "assetClass": "NSE"}],
             [],
         ]
+
+    def test_a_missing_or_invalid_asset_class_defaults_to_other_not_dropped(self):
+        raw = json.dumps([{"affected": [
+            {"symbol": "TCS", "direction": "up", "reason": "No assetClass given."},
+            {"symbol": "XAUUSD", "direction": "up", "assetClass": "MADE_UP", "reason": "Bogus class."},
+        ]}])
+        result = news._parse_impact_response(raw, n=1)
+        assert result[0][0]["assetClass"] == "OTHER"
+        assert result[0][1]["assetClass"] == "OTHER"
+
+    def test_every_real_asset_class_passes_through(self):
+        classes = ["NSE", "BSE", "NASDAQ", "NYSE", "FOREX", "MCX", "CRYPTO"]
+        raw = json.dumps([{"affected": [
+            {"symbol": "X", "direction": "up", "assetClass": c, "reason": "r"} for c in classes
+        ]}])
+        result = news._parse_impact_response(raw, n=1)
+        assert [item["assetClass"] for item in result[0]] == classes
 
     def test_a_markdown_fenced_response_is_unwrapped_first(self):
         raw = "```json\n" + json.dumps([{"affected": []}]) + "\n```"
@@ -60,7 +77,7 @@ class TestParseImpactResponse:
             ],
         }])
         result = news._parse_impact_response(raw, n=1)
-        assert result == [[{"symbol": "TCS", "direction": "up", "reason": "Real one."}]]
+        assert result == [[{"symbol": "TCS", "direction": "up", "reason": "Real one.", "assetClass": "OTHER"}]]
 
     def test_non_json_text_returns_none_not_an_empty_list(self):
         assert news._parse_impact_response("I cannot help with that.", n=3) is None
@@ -91,13 +108,13 @@ class TestAnalyzeImpacts:
     async def test_a_real_batched_call_covers_every_article_in_order(self):
         articles = [_article("CPI hotter than expected"), _article("Local bakery wins award")]
         llm = FakeLlm(_response(json.dumps([
-            {"affected": [{"symbol": "XAUUSD", "direction": "down", "reason": "Hot CPI strengthens USD, pressuring gold."}]},
+            {"affected": [{"symbol": "XAUUSD", "direction": "down", "assetClass": "FOREX", "reason": "Hot CPI strengthens USD, pressuring gold."}]},
             {"affected": []},
         ])))
         result = await news._analyze_impacts(llm, articles)
 
         assert result == [
-            [{"symbol": "XAUUSD", "direction": "down", "reason": "Hot CPI strengthens USD, pressuring gold."}],
+            [{"symbol": "XAUUSD", "direction": "down", "reason": "Hot CPI strengthens USD, pressuring gold.", "assetClass": "FOREX"}],
             [],
         ]
         # One call for the WHOLE batch, not one per article.
@@ -120,7 +137,7 @@ class TestGetMarketNewsResult:
     async def test_real_impacts_and_sentiment_both_land_on_the_right_article(self):
         articles = [_article("Rate cut expected"), _article("Nothing special")]
         llm = FakeLlm(_response(json.dumps([
-            {"affected": [{"symbol": "NIFTY", "direction": "up", "reason": "Cheaper credit lifts equities."}]},
+            {"affected": [{"symbol": "NIFTY", "direction": "up", "assetClass": "NSE", "reason": "Cheaper credit lifts equities."}]},
             {"affected": []},
         ])))
         with patch("app.market.news._fetch_newsapi", new=AsyncMock(return_value=articles)), \
@@ -131,7 +148,7 @@ class TestGetMarketNewsResult:
         assert result["degraded_reason"] is None
         a0, a1 = result["articles"]
         assert a0["sentiment"] == "POSITIVE"
-        assert a0["impacts"] == [{"symbol": "NIFTY", "direction": "up", "reason": "Cheaper credit lifts equities."}]
+        assert a0["impacts"] == [{"symbol": "NIFTY", "direction": "up", "reason": "Cheaper credit lifts equities.", "assetClass": "NSE"}]
         assert a1["impacts"] == []
 
     @pytest.mark.asyncio

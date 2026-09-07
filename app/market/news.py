@@ -38,6 +38,12 @@ NEWS_IMPACT_SYSTEM = (
     "and an empty list is the correct, honest answer for those, not a guess."
 )
 
+# This app's own real exchange/asset-class set (market.controller.ts's
+# EXCHANGES) plus CRYPTO (informational only -- no crypto trading/price
+# integration exists anywhere in this app) and OTHER, the honest fallback
+# for anything that doesn't fit rather than a forced wrong guess.
+ASSET_CLASSES = frozenset({"NSE", "BSE", "NASDAQ", "NYSE", "FOREX", "MCX", "CRYPTO", "OTHER"})
+
 # One entry per article costs real output tokens (symbol + direction + a
 # reason each) -- generous enough for a full page of headlines with real
 # impacts, without leaving the call effectively uncapped.
@@ -135,10 +141,12 @@ def _parse_impact_response(raw_text: str, n: int) -> list[list[dict]] | None:
                 direction = item.get("direction")
                 if not symbol or direction not in ("up", "down"):
                     continue
+                asset_class = item.get("assetClass")
                 clean.append({
                     "symbol": str(symbol).strip().upper(),
                     "direction": direction,
                     "reason": str(item.get("reason") or "").strip()[:200],
+                    "assetClass": asset_class if asset_class in ASSET_CLASSES else "OTHER",
                 })
         results.append(clean)
     return results
@@ -170,15 +178,16 @@ async def _analyze_impacts(llm: LlmClient, articles: list[dict]) -> list[list[di
         "For each numbered headline below, name the real, tradeable stocks or "
         "instruments it plausibly affects (their real ticker or a clear, "
         "specific name -- not limited to any fixed list), the direction each "
-        "would plausibly move (\"up\" or \"down\"), and one short reason "
-        "grounded in the headline itself. Most headlines affect nothing "
-        "tradeable -- return an empty \"affected\" list for those rather than "
-        "forcing a connection.\n\n"
+        "would plausibly move (\"up\" or \"down\"), which market it trades on "
+        "(assetClass: one of NSE, BSE, NASDAQ, NYSE, FOREX, MCX, CRYPTO -- use "
+        "OTHER only if truly none fit), and one short reason grounded in the "
+        "headline itself. Most headlines affect nothing tradeable -- return an "
+        "empty \"affected\" list for those rather than forcing a connection.\n\n"
         f"{numbered}\n\n"
         "Respond with ONLY a JSON array, exactly one object per headline, in "
         "the same order, no other text:\n"
         "[{\"affected\": [{\"symbol\": \"RELIANCE\", \"direction\": \"down\", "
-        "\"reason\": \"...\"}]}, ...]"
+        "\"assetClass\": \"NSE\", \"reason\": \"...\"}]}, ...]"
     )
     try:
         resp = await asyncio.to_thread(
