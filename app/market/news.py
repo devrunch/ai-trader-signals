@@ -444,3 +444,26 @@ async def get_market_news_result(
 async def get_market_news(symbols: list[str] | None = None, page_size: int = 15) -> list[dict]:
     """Articles only. Prefer `get_market_news_result` — it says what degraded."""
     return (await get_market_news_result(symbols, page_size))["articles"]
+
+
+async def publish(result: dict) -> bool:
+    """Store the latest news analysis via the NestJS internal endpoint --
+    mirrors app/signals/brief.py's own `publish`. Called by the
+    run_news_analysis Celery task, not by the live HTTP route: this is what
+    moves the real NewsAPI/HF/LLM work out of the request path, the same
+    way the twice-daily brief and the drift-check/reddit-sentiment alerts
+    already run on a schedule instead of live per page load."""
+    settings = get_settings()
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.post(
+                f"{settings.api_service_url}/api/internal/news",
+                headers={"x-internal-key": settings.internal_api_key},
+                json=result,
+            )
+            r.raise_for_status()
+        logger.info("News analysis published: %d articles", result.get("count", 0))
+        return True
+    except httpx.HTTPError as e:
+        logger.warning("News analysis publish failed: %s", e)
+        return False
