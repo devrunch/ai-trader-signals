@@ -32,13 +32,18 @@ HF_INFER_URL = "https://router.huggingface.co/hf-inference/models"
 
 # The India-only version of this query meant a real, forex-moving headline
 # (e.g. "Dollar falls ahead of US inflation data") never matched at all --
-# this app charts FOREX/metals (XAUUSD etc.) too, so the default feed can't
-# stay India-equity-only.
+# this app charts FOREX/metals (XAUUSD etc.) too. The first broadened
+# version kept 7 India-specific terms (NSE, BSE, "Indian stock", SEBI,
+# "Dalal Street", RBI, "equity market") against only 6 global ones,
+# skewing the default feed India-heavy in practice -- Indian financial
+# outlets use those particular words constantly, flooding the match. Down
+# to Nifty/Sensex only for India (still real coverage of this app's own
+# NSE/BSE symbols) and weighted toward global macro/forex/equity terms,
+# which is what the product actually needs front and center.
 DEFAULT_MARKET_QUERY = (
-    "NSE OR BSE OR Nifty OR Sensex OR \"Indian stock\" OR SEBI OR "
-    "\"Dalal Street\" OR RBI OR \"equity market\" OR "
     "\"Federal Reserve\" OR \"interest rate\" OR inflation OR CPI OR "
-    "dollar OR gold OR crude OR forex OR \"currency market\""
+    "dollar OR gold OR crude oil OR Bitcoin OR forex OR \"stock market\" OR "
+    "Nasdaq OR \"S&P 500\" OR \"Wall Street\" OR Nifty OR Sensex"
 )
 
 NEWS_IMPACT_SYSTEM = (
