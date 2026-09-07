@@ -27,9 +27,16 @@ NEWSAPI_URL  = "https://newsapi.org/v2/everything"
 # HF retired api-inference.huggingface.co — inference now routes through router.huggingface.co
 HF_INFER_URL = "https://router.huggingface.co/hf-inference/models"
 
-INDIA_MARKET_QUERY = (
+
+# The India-only version of this query meant a real, forex-moving headline
+# (e.g. "Dollar falls ahead of US inflation data") never matched at all --
+# this app charts FOREX/metals (XAUUSD etc.) too, so the default feed can't
+# stay India-equity-only.
+DEFAULT_MARKET_QUERY = (
     "NSE OR BSE OR Nifty OR Sensex OR \"Indian stock\" OR SEBI OR "
-    "\"Dalal Street\" OR RBI OR \"equity market\""
+    "\"Dalal Street\" OR RBI OR \"equity market\" OR "
+    "\"Federal Reserve\" OR \"interest rate\" OR inflation OR CPI OR "
+    "dollar OR gold OR crude OR forex OR \"currency market\""
 )
 
 NEWS_IMPACT_SYSTEM = (
@@ -225,7 +232,7 @@ async def get_market_news_result(
     if symbols:
         query = " OR ".join(symbols[:5])
     else:
-        query = INDIA_MARKET_QUERY
+        query = DEFAULT_MARKET_QUERY
 
     try:
         articles = await _fetch_newsapi(query, page_size)
