@@ -1,8 +1,9 @@
 """
 News feed with FinBERT sentiment scoring (HF Inference API) and real
-per-headline stock-impact analysis (LLM, one batched call for the whole
-page) -- see _analyze_impacts' own docstring for why this replaced a naive
-keyword match against a fixed ticker shortlist.
+per-headline stock-impact analysis (LLM, chunked into small concurrent
+batches -- see _analyze_impacts' own docstring) -- see _analyze_chunk's own
+docstring for why this replaced a naive keyword match against a fixed
+ticker shortlist.
 """
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ import logging
 from datetime import UTC, datetime
 
 import httpx
+import redis.asyncio as redis
 
 from app.config import get_settings
 from app.llm.client import LlmClient, get_llm
@@ -61,6 +63,14 @@ ASSET_CLASSES = frozenset({"NSE", "BSE", "NASDAQ", "NYSE", "FOREX", "MCX", "CRYP
 # trusted to still be in headline order. Not raised further than this
 # without also raising page_size, since the call still needs a real cap.
 IMPACT_MAX_TOKENS = 4096
+
+# A full get_market_news_result() call is a real NewsAPI fetch plus an HF
+# sentiment call plus several concurrent LLM impact-analysis calls -- a few
+# real seconds every time, unavoidable if it's actually run each time. Most
+# repeat page loads within a few minutes don't need a fresh analysis of
+# what is very likely the same headlines, so the full result (not just the
+# raw articles) is cached for a short, deliberately sub-"stale news" window.
+NEWS_CACHE_TTL_SECONDS = 5 * 60
 
 
 async def _fetch_newsapi(query: str, page_size: int = 20) -> list[dict]:
@@ -165,29 +175,34 @@ def _parse_impact_response(raw_text: str, n: int) -> list[list[dict]] | None:
     return results
 
 
-async def _analyze_impacts(llm: LlmClient, articles: list[dict]) -> list[list[dict]] | None:
-    """Real per-headline stock/instrument impact, one batched LLM call for
-    the whole page -- not the keyword match this replaced (`_extract_symbols`,
-    a plain substring check against a hardcoded 17-ticker shortlist: blind to
-    anything outside that list, and "mentions the ticker" is not the same
-    question as "this headline plausibly moves this instrument"). The model
-    names real symbols freely, not constrained to any fixed universe -- a
-    hardcoded shortlist here would just be the same arbitrariness one level
-    up.
+# Articles per LLM call. Splitting into small chunks (run concurrently, see
+# _analyze_impacts) rather than one call for the whole page keeps each
+# call's real output comfortably under IMPACT_MAX_TOKENS regardless of how
+# many real, multi-symbol impacts land in a given page -- a single 25-
+# article call was getting cut off mid-array once the broadened news query
+# (see DEFAULT_MARKET_QUERY) made real impacts common, and a fixed token
+# ceiling can't scale with "how much real content happened to be in this
+# batch." Running chunks concurrently also means splitting the page doesn't
+# cost extra wall-clock time.
+IMPACT_CHUNK_SIZE = 8
 
-    Returns None (not a list of empty lists) when the WHOLE batch could not
-    be analyzed -- no LLM configured, the call failed, the response was the
-    wrong shape. Callers must not read that as "no headline had a real
-    impact today"; see get_market_news_result's own docs for how it's
+
+async def _analyze_chunk(llm: LlmClient, chunk: list[dict]) -> list[list[dict]] | None:
+    """One LLM call (with one retry) for a single chunk of articles --
+    see _analyze_impacts for how chunks are split and combined, and for
+    the "why not keyword-matching" rationale this used to carry.
+
+    Returns None (not a list of empty lists) when this CHUNK could not be
+    analyzed -- no LLM configured, the call failed, the response was the
+    wrong shape. Callers must not read that as "no headline in this chunk
+    had a real impact"; see get_market_news_result's own docs for how it's
     surfaced.
     """
-    if not articles:
-        return []
     numbered = "\n".join(
         f"{i}. {a.get('title') or ''} -- {a.get('description') or ''}"
-        for i, a in enumerate(articles)
+        for i, a in enumerate(chunk)
     )
-    n = len(articles)
+    n = len(chunk)
     prompt = (
         "For each numbered headline below, name the real, tradeable stocks or "
         "instruments it plausibly affects (their real ticker or a clear, "
@@ -216,13 +231,15 @@ async def _analyze_impacts(llm: LlmClient, articles: list[dict]) -> list[list[di
     ]
     # One retry, not a loop: the model occasionally drifts off the exact
     # count (splits a multi-impact headline into two objects, or drops one)
-    # -- worth one more real attempt before reporting the whole batch
-    # unavailable, but this must stay bounded, not become a silent retry
-    # storm against a model that's reliably getting it wrong.
-    for attempt in range(2):
+    # -- worth one more real attempt before reporting this chunk unavailable,
+    # but this must stay bounded, not become a silent retry storm against a
+    # model that's reliably getting it wrong. The retry runs at a nonzero
+    # temperature deliberately: at temperature=0 a retry would just replay
+    # the exact same (wrong) output for the exact same prompt.
+    for attempt, temperature in enumerate((0, 0.3)):
         try:
             resp = await asyncio.to_thread(
-                llm.chat, temperature=0, max_tokens=IMPACT_MAX_TOKENS, messages=messages,
+                llm.chat, temperature=temperature, max_tokens=IMPACT_MAX_TOKENS, messages=messages,
             )
         except Exception as e:
             logger.warning("News impact analysis failed: %s", e)
@@ -233,6 +250,39 @@ async def _analyze_impacts(llm: LlmClient, articles: list[dict]) -> list[list[di
         if attempt == 0:
             logger.info("News impact analysis retrying once after a malformed response")
     return None
+
+
+async def _analyze_impacts(llm: LlmClient, articles: list[dict]) -> list[list[dict]] | None:
+    """Real per-headline stock/instrument impact -- not the keyword match
+    this replaced (`_extract_symbols`, a plain substring check against a
+    hardcoded 17-ticker shortlist: blind to anything outside that list, and
+    "mentions the ticker" is not the same question as "this headline
+    plausibly moves this instrument"). The model names real symbols freely,
+    not constrained to any fixed universe -- a hardcoded shortlist here
+    would just be the same arbitrariness one level up.
+
+    Splits `articles` into IMPACT_CHUNK_SIZE-sized chunks and analyzes them
+    concurrently (see _analyze_chunk) rather than one call for the whole
+    page -- keeps latency roughly flat as the page grows instead of one
+    long serial call, and keeps each call's real output safely under the
+    token cap regardless of how many real impacts land in a given page.
+
+    Returns None (not a list of empty lists) when ANY chunk could not be
+    analyzed -- no LLM configured, a call failed, a response was the wrong
+    shape even after its retry. Callers must not read that as "no headline
+    had a real impact today"; see get_market_news_result's own docs for how
+    it's surfaced.
+    """
+    if not articles:
+        return []
+    chunks = [articles[i:i + IMPACT_CHUNK_SIZE] for i in range(0, len(articles), IMPACT_CHUNK_SIZE)]
+    results = await asyncio.gather(*(_analyze_chunk(llm, c) for c in chunks))
+    if any(r is None for r in results):
+        return None
+    combined: list[list[dict]] = []
+    for r in results:
+        combined.extend(r)
+    return combined
 
 
 async def get_market_news_result(
@@ -252,11 +302,32 @@ async def get_market_news_result(
     caller can tell "analyzed, found nothing" from "couldn't analyze",
     which used to look identical for both sentiment (NEUTRAL either way)
     and impact (empty list either way).
+
+    The full result is cached in Redis for NEWS_CACHE_TTL_SECONDS, keyed by
+    the real query text and page_size -- see that constant's own comment
+    for why. A total news-fetch failure is never cached (returned before
+    the cache write below), so a transient NewsAPI outage self-heals on
+    the very next request instead of being replayed for the rest of the
+    TTL window.
     """
     if symbols:
         query = " OR ".join(symbols[:5])
     else:
         query = DEFAULT_MARKET_QUERY
+
+    settings = get_settings()
+    cache_key = f"news:result:{query}:{page_size}"
+    r = redis.from_url(settings.redis_url)
+    try:
+        cached = await r.get(cache_key)
+        if cached:
+            return json.loads(cached)
+    except Exception as e:
+        # A cache read failing must degrade to "run it fresh," never to a
+        # 500 -- this is a speed-up, not a dependency.
+        logger.warning("News cache read failed: %s", e)
+    finally:
+        await r.aclose()
 
     try:
         articles = await _fetch_newsapi(query, page_size)
@@ -328,12 +399,30 @@ async def get_market_news_result(
     else:
         degraded_reason = None
 
-    return {
+    final = {
         "articles": results,
         "count": len(results),
         "degraded": degraded,
         "degraded_reason": degraded_reason,
     }
+
+    # Cache the real result -- even a partially-degraded one (missing
+    # sentiment or impacts) is still real data worth serving fast for a
+    # repeat request in the same short window, not worth re-running every
+    # LLM call again on the mere chance a transient failure clears itself
+    # a few seconds later. A total fetch failure (news_unavailable) never
+    # reaches here -- those return early above, uncached, so the next
+    # request retries the fetch instead of replaying a cached empty page.
+    try:
+        r = redis.from_url(settings.redis_url)
+        try:
+            await r.set(cache_key, json.dumps(final), ex=NEWS_CACHE_TTL_SECONDS)
+        finally:
+            await r.aclose()
+    except Exception as e:
+        logger.warning("News cache write failed: %s", e)
+
+    return final
 
 
 async def get_market_news(symbols: list[str] | None = None, page_size: int = 15) -> list[dict]:

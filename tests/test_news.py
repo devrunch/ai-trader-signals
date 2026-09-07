@@ -34,6 +34,24 @@ def _article(title="Headline", description="Description"):
             "source": {"name": "Reuters"}}
 
 
+class _FakeRedis:
+    """Same minimal shape as test_macro_events.py's own fake -- get/set/aclose
+    only. Always a cache miss unless the test seeds `store` itself, so these
+    tests exercise the real fetch/analyze path, not a leftover cached page."""
+
+    def __init__(self):
+        self.store: dict[str, bytes] = {}
+
+    async def get(self, key):
+        return self.store.get(key)
+
+    async def set(self, key, value, ex=None):
+        self.store[key] = value.encode() if isinstance(value, str) else value
+
+    async def aclose(self):
+        pass
+
+
 class TestParseImpactResponse:
     def test_a_clean_valid_response_parses_as_is(self):
         raw = json.dumps([
@@ -155,6 +173,55 @@ class TestAnalyzeImpacts:
         assert len(llm.calls) == 2
 
 
+class _ContentAwareLlm:
+    """Picks its response by matching a substring in the PROMPT rather than
+    call order -- chunks run concurrently via asyncio.gather, so which
+    chunk's chat() call actually lands first is not deterministic the way
+    FakeLlm's plain queue assumes."""
+
+    def __init__(self, mapping: dict[str, str]):
+        self.mapping = mapping
+        self.calls: list[dict] = []
+
+    def chat(self, **kwargs):
+        self.calls.append(kwargs)
+        prompt = kwargs["messages"][1]["content"]
+        for key, content in self.mapping.items():
+            if key in prompt:
+                return _response(content)
+        raise AssertionError(f"No mapped response for prompt containing: {prompt[:120]!r}")
+
+
+class TestAnalyzeImpactsChunking:
+    @pytest.mark.asyncio
+    async def test_more_than_chunk_size_splits_into_concurrent_calls_combined_in_order(self):
+        # IMPACT_CHUNK_SIZE is 8 -- 10 articles must split into a chunk of 8
+        # and a chunk of 2, not one call for all 10.
+        articles = [_article(f"Headline {i}") for i in range(10)]
+        llm = _ContentAwareLlm({
+            "0. Headline 0": json.dumps([{"affected": []}] * 8),
+            "0. Headline 8": json.dumps([
+                {"affected": [{"symbol": "TCS", "direction": "up", "assetClass": "NSE", "reason": "r"}]},
+                {"affected": []},
+            ]),
+        })
+        result = await news._analyze_impacts(llm, articles)
+        assert len(result) == 10
+        assert result[8] == [{"symbol": "TCS", "direction": "up", "assetClass": "NSE", "reason": "r"}]
+        assert result[9] == []
+        assert len(llm.calls) == 2
+
+    @pytest.mark.asyncio
+    async def test_one_failing_chunk_fails_the_whole_batch(self):
+        articles = [_article(f"Headline {i}") for i in range(10)]
+        llm = _ContentAwareLlm({
+            "0. Headline 0": json.dumps([{"affected": []}] * 8),
+            "0. Headline 8": "not json at all",  # both the attempt and its retry return this
+        })
+        result = await news._analyze_impacts(llm, articles)
+        assert result is None
+
+
 class TestGetMarketNewsResult:
     @pytest.mark.asyncio
     async def test_real_impacts_and_sentiment_both_land_on_the_right_article(self):
@@ -164,7 +231,8 @@ class TestGetMarketNewsResult:
             {"affected": []},
         ])))
         with patch("app.market.news._fetch_newsapi", new=AsyncMock(return_value=articles)), \
-             patch("app.market.news._hf_sentiment_batch", new=AsyncMock(return_value=[("POSITIVE", 0.9), ("NEUTRAL", 0.0)])):
+             patch("app.market.news._hf_sentiment_batch", new=AsyncMock(return_value=[("POSITIVE", 0.9), ("NEUTRAL", 0.0)])), \
+             patch("app.market.news.redis.from_url", return_value=_FakeRedis()):
             result = await news.get_market_news_result(llm=llm)
 
         assert result["degraded"] is False
@@ -179,7 +247,8 @@ class TestGetMarketNewsResult:
         articles = [_article()]
         broken_llm = FakeLlm()  # never queued a response -- IndexError inside chat()
         with patch("app.market.news._fetch_newsapi", new=AsyncMock(return_value=articles)), \
-             patch("app.market.news._hf_sentiment_batch", new=AsyncMock(return_value=[("POSITIVE", 0.5)])):
+             patch("app.market.news._hf_sentiment_batch", new=AsyncMock(return_value=[("POSITIVE", 0.5)])), \
+             patch("app.market.news.redis.from_url", return_value=_FakeRedis()):
             result = await news.get_market_news_result(llm=broken_llm)
 
         assert result["degraded"] is True
@@ -192,7 +261,8 @@ class TestGetMarketNewsResult:
         articles = [_article()]
         broken_llm = FakeLlm()
         with patch("app.market.news._fetch_newsapi", new=AsyncMock(return_value=articles)), \
-             patch("app.market.news._hf_sentiment_batch", new=AsyncMock(return_value=None)):
+             patch("app.market.news._hf_sentiment_batch", new=AsyncMock(return_value=None)), \
+             patch("app.market.news.redis.from_url", return_value=_FakeRedis()):
             result = await news.get_market_news_result(llm=broken_llm)
 
         assert result["degraded_reason"] == "sentiment_and_impact_unavailable"
@@ -201,6 +271,35 @@ class TestGetMarketNewsResult:
 
     @pytest.mark.asyncio
     async def test_a_news_fetch_failure_still_returns_a_well_shaped_empty_result(self):
-        with patch("app.market.news._fetch_newsapi", new=AsyncMock(side_effect=RuntimeError("boom"))):
+        with patch("app.market.news._fetch_newsapi", new=AsyncMock(side_effect=RuntimeError("boom"))), \
+             patch("app.market.news.redis.from_url", return_value=_FakeRedis()):
             result = await news.get_market_news_result()
         assert result == {"articles": [], "count": 0, "degraded": True, "degraded_reason": "news_unavailable"}
+
+    @pytest.mark.asyncio
+    async def test_a_cached_result_is_returned_without_hitting_newsapi_again(self):
+        fake_redis = _FakeRedis()
+        articles = [_article("Cached headline")]
+        llm = FakeLlm(_response(json.dumps([{"affected": []}])))
+        fetch = AsyncMock(return_value=articles)
+        with patch("app.market.news._fetch_newsapi", new=fetch), \
+             patch("app.market.news._hf_sentiment_batch", new=AsyncMock(return_value=[("NEUTRAL", 0.0)])), \
+             patch("app.market.news.redis.from_url", return_value=fake_redis):
+            first = await news.get_market_news_result(llm=llm)
+            second = await news.get_market_news_result(llm=llm)
+
+        assert first == second
+        # The second call served the cached result -- NewsAPI was hit once, not twice.
+        assert fetch.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_total_fetch_failure_is_never_cached(self):
+        fake_redis = _FakeRedis()
+        fetch = AsyncMock(side_effect=RuntimeError("boom"))
+        with patch("app.market.news._fetch_newsapi", new=fetch), \
+             patch("app.market.news.redis.from_url", return_value=fake_redis):
+            await news.get_market_news_result()
+            await news.get_market_news_result()
+
+        # Retried on the very next call rather than replaying a cached failure.
+        assert fetch.await_count == 2
