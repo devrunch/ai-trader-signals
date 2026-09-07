@@ -211,11 +211,14 @@ async def _analyze_chunk(llm: LlmClient, chunk: list[dict]) -> list[list[dict]] 
         "(assetClass: one of NSE, BSE, NASDAQ, NYSE, FOREX, MCX, CRYPTO -- use "
         "OTHER only if truly none fit), and one short reason grounded in the "
         "headline itself. Most headlines affect nothing tradeable -- return an "
-        "empty \"affected\" list for those rather than forcing a connection. "
+        "empty \"affected\" list for those rather than forcing a connection -- "
+        "even a headline with nothing tradeable still gets its OWN object "
+        "with an empty \"affected\" array, never omitted from the response. "
         "A headline with several affected instruments still gets ONE object, "
         "with all of them in that one \"affected\" array -- never split one "
         f"headline across two objects.\n\n{numbered}\n\n"
-        f"Respond with ONLY a JSON array of EXACTLY {n} objects -- one per "
+        f"Respond with ONLY a JSON array of EXACTLY {n} object"
+        f"{'s' if n != 1 else ''} -- one per "
         "headline above, in the same order, never fewer or more -- no other "
         "text:\n"
         "[{\"affected\": [{\"symbol\": \"RELIANCE\", \"direction\": \"down\", "
@@ -261,11 +264,18 @@ async def _analyze_impacts(llm: LlmClient, articles: list[dict]) -> list[list[di
     not constrained to any fixed universe -- a hardcoded shortlist here
     would just be the same arbitrariness one level up.
 
-    Splits `articles` into IMPACT_CHUNK_SIZE-sized chunks and analyzes them
-    concurrently (see _analyze_chunk) rather than one call for the whole
-    page -- keeps latency roughly flat as the page grows instead of one
-    long serial call, and keeps each call's real output safely under the
-    token cap regardless of how many real impacts land in a given page.
+    Splits `articles` into roughly-EQUAL-sized chunks around
+    IMPACT_CHUNK_SIZE and analyzes them concurrently (see _analyze_chunk)
+    rather than one call for the whole page -- keeps latency roughly flat
+    as the page grows instead of one long serial call, and keeps each
+    call's real output safely under the token cap regardless of how many
+    real impacts land in a given page. Deliberately balanced rather than
+    greedy fixed-size slicing (25 articles at size 8 greedily gives
+    8,8,8,1): confirmed live that a 1-article leftover chunk is a HARDER
+    case for the model to shape correctly than a normal-sized one -- it
+    would sometimes answer a single irrelevant headline with a bare `[]`
+    instead of the required `[{"affected": []}]`, tripping the exact-length
+    check for no real reason.
 
     Returns None (not a list of empty lists) when ANY chunk could not be
     analyzed -- no LLM configured, a call failed, a response was the wrong
@@ -275,7 +285,13 @@ async def _analyze_impacts(llm: LlmClient, articles: list[dict]) -> list[list[di
     """
     if not articles:
         return []
-    chunks = [articles[i:i + IMPACT_CHUNK_SIZE] for i in range(0, len(articles), IMPACT_CHUNK_SIZE)]
+    num_chunks = -(-len(articles) // IMPACT_CHUNK_SIZE)  # ceil division
+    base, extra = divmod(len(articles), num_chunks)
+    chunks, i = [], 0
+    for c in range(num_chunks):
+        size = base + (1 if c < extra else 0)
+        chunks.append(articles[i:i + size])
+        i += size
     results = await asyncio.gather(*(_analyze_chunk(llm, c) for c in chunks))
     if any(r is None for r in results):
         return None

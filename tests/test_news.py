@@ -7,6 +7,7 @@ test_orchestrator.py already established for LlmClient.
 from __future__ import annotations
 
 import json
+import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -192,15 +193,33 @@ class _ContentAwareLlm:
         raise AssertionError(f"No mapped response for prompt containing: {prompt[:120]!r}")
 
 
+class _EchoLlm:
+    """Returns a syntactically valid response sized to match whatever the
+    prompt actually asked for -- avoids hardcoding one specific chunk
+    split, since the point of the balanced-chunking test is the invariant
+    (every article covered, no call ever sees exactly 1 headline unless
+    there's truly only 1 article total), not one particular boundary."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def chat(self, **kwargs):
+        self.calls.append(kwargs)
+        n = len(re.findall(r"(?m)^\d+\. ", kwargs["messages"][1]["content"]))
+        return _response(json.dumps([{"affected": []}] * n))
+
+
 class TestAnalyzeImpactsChunking:
     @pytest.mark.asyncio
     async def test_more_than_chunk_size_splits_into_concurrent_calls_combined_in_order(self):
-        # IMPACT_CHUNK_SIZE is 8 -- 10 articles must split into a chunk of 8
-        # and a chunk of 2, not one call for all 10.
+        # IMPACT_CHUNK_SIZE is 8 -- 10 articles balance into two 5-article
+        # chunks (ceil(10/8)=2 chunks, split as evenly as possible), not
+        # one call for all 10 and not a greedy 8+2.
         articles = [_article(f"Headline {i}") for i in range(10)]
         llm = _ContentAwareLlm({
-            "0. Headline 0": json.dumps([{"affected": []}] * 8),
-            "0. Headline 8": json.dumps([
+            "0. Headline 0": json.dumps([{"affected": []}] * 5),
+            "0. Headline 5": json.dumps([
+                {"affected": []}, {"affected": []}, {"affected": []},
                 {"affected": [{"symbol": "TCS", "direction": "up", "assetClass": "NSE", "reason": "r"}]},
                 {"affected": []},
             ]),
@@ -215,11 +234,26 @@ class TestAnalyzeImpactsChunking:
     async def test_one_failing_chunk_fails_the_whole_batch(self):
         articles = [_article(f"Headline {i}") for i in range(10)]
         llm = _ContentAwareLlm({
-            "0. Headline 0": json.dumps([{"affected": []}] * 8),
-            "0. Headline 8": "not json at all",  # both the attempt and its retry return this
+            "0. Headline 0": json.dumps([{"affected": []}] * 5),
+            "0. Headline 5": "not json at all",  # both the attempt and its retry return this
         })
         result = await news._analyze_impacts(llm, articles)
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_25_articles_split_evenly_with_no_size_one_straggler(self):
+        # Confirmed live: a fixed-size greedy split of 25 articles at chunk
+        # size 8 gives 8,8,8,1 -- and that lone leftover article was a
+        # harder case for the model, sometimes answering with a bare `[]`
+        # instead of the required one-object-per-headline response.
+        articles = [_article(f"Headline {i}") for i in range(25)]
+        llm = _EchoLlm()
+        result = await news._analyze_impacts(llm, articles)
+        assert result == [[] for _ in range(25)]
+        assert len(llm.calls) == 4  # ceil(25/8)
+        sizes = sorted(len(re.findall(r"(?m)^\d+\. ", c["messages"][1]["content"])) for c in llm.calls)
+        assert sizes == [6, 6, 6, 7]
+        assert 1 not in sizes
 
 
 class TestGetMarketNewsResult:
