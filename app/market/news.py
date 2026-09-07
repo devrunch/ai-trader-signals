@@ -187,6 +187,7 @@ async def _analyze_impacts(llm: LlmClient, articles: list[dict]) -> list[list[di
         f"{i}. {a.get('title') or ''} -- {a.get('description') or ''}"
         for i, a in enumerate(articles)
     )
+    n = len(articles)
     prompt = (
         "For each numbered headline below, name the real, tradeable stocks or "
         "instruments it plausibly affects (their real ticker or a clear, "
@@ -195,26 +196,43 @@ async def _analyze_impacts(llm: LlmClient, articles: list[dict]) -> list[list[di
         "(assetClass: one of NSE, BSE, NASDAQ, NYSE, FOREX, MCX, CRYPTO -- use "
         "OTHER only if truly none fit), and one short reason grounded in the "
         "headline itself. Most headlines affect nothing tradeable -- return an "
-        "empty \"affected\" list for those rather than forcing a connection.\n\n"
-        f"{numbered}\n\n"
-        "Respond with ONLY a JSON array, exactly one object per headline, in "
-        "the same order, no other text:\n"
+        "empty \"affected\" list for those rather than forcing a connection. "
+        "A headline with several affected instruments still gets ONE object, "
+        "with all of them in that one \"affected\" array -- never split one "
+        f"headline across two objects.\n\n{numbered}\n\n"
+        f"Respond with ONLY a JSON array of EXACTLY {n} objects -- one per "
+        "headline above, in the same order, never fewer or more -- no other "
+        "text:\n"
         "[{\"affected\": [{\"symbol\": \"RELIANCE\", \"direction\": \"down\", "
-        "\"assetClass\": \"NSE\", \"reason\": \"...\"}]}, ...]"
+        "\"assetClass\": \"NSE\", \"reason\": \"...\"}]}, "
+        "{\"affected\": [{\"symbol\": \"BZ=F\", \"direction\": \"up\", "
+        "\"assetClass\": \"MCX\", \"reason\": \"...\"}, {\"symbol\": \"USO\", "
+        "\"direction\": \"up\", \"assetClass\": \"NYSE\", \"reason\": \"...\"}]}, "
+        "...]"
     )
-    try:
-        resp = await asyncio.to_thread(
-            llm.chat,
-            temperature=0, max_tokens=IMPACT_MAX_TOKENS,
-            messages=[
-                {"role": "system", "content": NEWS_IMPACT_SYSTEM},
-                {"role": "user", "content": prompt},
-            ],
-        )
-        return _parse_impact_response(resp.choices[0].message.content or "", len(articles))
-    except Exception as e:
-        logger.warning("News impact analysis failed: %s", e)
-        return None
+    messages = [
+        {"role": "system", "content": NEWS_IMPACT_SYSTEM},
+        {"role": "user", "content": prompt},
+    ]
+    # One retry, not a loop: the model occasionally drifts off the exact
+    # count (splits a multi-impact headline into two objects, or drops one)
+    # -- worth one more real attempt before reporting the whole batch
+    # unavailable, but this must stay bounded, not become a silent retry
+    # storm against a model that's reliably getting it wrong.
+    for attempt in range(2):
+        try:
+            resp = await asyncio.to_thread(
+                llm.chat, temperature=0, max_tokens=IMPACT_MAX_TOKENS, messages=messages,
+            )
+        except Exception as e:
+            logger.warning("News impact analysis failed: %s", e)
+            return None
+        parsed = _parse_impact_response(resp.choices[0].message.content or "", n)
+        if parsed is not None:
+            return parsed
+        if attempt == 0:
+            logger.info("News impact analysis retrying once after a malformed response")
+    return None
 
 
 async def get_market_news_result(

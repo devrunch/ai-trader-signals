@@ -131,6 +131,29 @@ class TestAnalyzeImpacts:
         result = await news._analyze_impacts(BrokenLlm(), [_article()])
         assert result is None
 
+    @pytest.mark.asyncio
+    async def test_a_wrong_length_response_is_retried_once_and_can_succeed(self):
+        articles = [_article("A"), _article("B")]
+        # First response drops an entry (wrong length); second is clean.
+        llm = FakeLlm(
+            _response(json.dumps([{"affected": []}])),
+            _response(json.dumps([{"affected": []}, {"affected": []}])),
+        )
+        result = await news._analyze_impacts(llm, articles)
+        assert result == [[], []]
+        assert len(llm.calls) == 2
+
+    @pytest.mark.asyncio
+    async def test_two_wrong_length_responses_in_a_row_gives_up_as_none(self):
+        articles = [_article("A"), _article("B")]
+        llm = FakeLlm(
+            _response(json.dumps([{"affected": []}])),
+            _response(json.dumps([{"affected": []}])),
+        )
+        result = await news._analyze_impacts(llm, articles)
+        assert result is None
+        assert len(llm.calls) == 2
+
 
 class TestGetMarketNewsResult:
     @pytest.mark.asyncio
