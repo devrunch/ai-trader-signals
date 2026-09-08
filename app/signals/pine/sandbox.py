@@ -82,11 +82,34 @@ def _kill_by_pid(pid: int) -> None:
         pass
 
 
+def _is_usable(proc: asyncio.subprocess.Process) -> bool:
+    """Whether this process can actually be written to right now.
+
+    `returncode is None` alone is not enough: it only flips once asyncio
+    has reaped the child, so a process killed moments ago (the OOM killer
+    on a memory-tight box, most often) still reads as alive while its
+    stdin transport is already closed. Writing to that raises "unable to
+    perform operation on <WriteUnixTransport closed=True ...>; the handler
+    is closed" -- confirmed live, and it cost a whole request plus its
+    retry to discover something checkable up front.
+    """
+    return (
+        proc.returncode is None
+        and proc.stdin is not None and not proc.stdin.is_closing()
+        and proc.stdout is not None and not proc.stdout.at_eof()
+    )
+
+
 async def _ensure_process() -> asyncio.subprocess.Process:
     global _process, _process_loop
     current_loop = asyncio.get_running_loop()
-    if _process is not None and _process_loop is current_loop and _process.returncode is None:
+    if _process is not None and _process_loop is current_loop and _is_usable(_process):
         return _process
+    if _process is not None and _process_loop is current_loop:
+        # Dead or half-closed, and ours to clean up: reap it before
+        # replacing it, or the old child lingers as a zombie holding
+        # memory this box does not have to spare.
+        await _kill_process()
     if _process is not None and _process_loop is not current_loop:
         _kill_by_pid(_process.pid)
     _process = await asyncio.create_subprocess_exec(

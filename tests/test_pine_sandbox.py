@@ -134,3 +134,36 @@ async def test_run_pine_script_does_not_retry_a_real_script_failure(monkeypatch)
 
     assert result["ok"] is False
     assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_process_whose_stdin_is_already_closed_is_replaced_not_written_to():
+    """Regression test for a real production failure.
+
+    The OOM killer takes the Node child on a memory-tight box, but
+    `returncode` only flips once asyncio reaps it -- so the process still
+    read as alive while its stdin transport was already closed. Every such
+    request then died on "unable to perform operation on
+    <WriteUnixTransport closed=True ...>; the handler is closed", burning
+    the request and its retry to learn something checkable up front.
+    """
+    await run_pine_script('//@version=5\nindicator("t")\nplot(ta.sma(close, 5), "SMA5")', BARS)
+    dead = sandbox_module._process
+    assert dead is not None
+
+    # Exactly the live condition: transport closed, not yet reaped.
+    dead.stdin.close()
+    assert dead.returncode is None
+    assert sandbox_module._is_usable(dead) is False
+
+    result = await run_pine_script('//@version=5\nindicator("t")\nplot(ta.ema(close, 5), "EMA5")', BARS)
+
+    assert result["ok"] is True
+    assert sandbox_module._process is not dead
+    assert isinstance(result["plots"]["EMA5"], list)
+
+
+@pytest.mark.asyncio
+async def test_a_live_process_is_still_considered_usable():
+    await run_pine_script('//@version=5\nindicator("t")\nplot(ta.sma(close, 5), "SMA5")', BARS)
+    assert sandbox_module._is_usable(sandbox_module._process) is True
