@@ -31,8 +31,11 @@ class FakeLlm:
 
 
 def _article(title="Headline", description="Description"):
-    return {"title": title, "description": description, "url": "https://example.com/a", "publishedAt": "2026-01-01T00:00:00Z",
-            "source": {"name": "Reuters"}}
+    # A url per title -- _merge_sources dedupes on url, so a shared one
+    # would silently collapse every multi-article fixture down to one.
+    slug = title.lower().replace(" ", "-")
+    return {"title": title, "description": description, "url": f"https://example.com/{slug}",
+            "publishedAt": "2026-01-01T00:00:00Z", "source": {"name": "Reuters"}}
 
 
 class _FakeRedis:
@@ -45,6 +48,9 @@ class _FakeRedis:
 
     async def get(self, key):
         return self.store.get(key)
+
+    async def mget(self, keys):
+        return [self.store.get(k) for k in keys]
 
     async def set(self, key, value, ex=None):
         self.store[key] = value.encode() if isinstance(value, str) else value
@@ -337,6 +343,15 @@ class TestAnalyzeImpactsChunking:
 
 
 class TestGetMarketNewsResult:
+    @pytest.fixture(autouse=True)
+    def _no_yfinance(self):
+        """These cases are about the NewsAPI half and the assembly around
+        it. Without this the real yfinance source would run -- a live
+        network call inside a unit test. The merge itself has its own
+        cases in TestMergeSources / TestTwoSources below."""
+        with patch("app.market.news._fetch_yfinance", new=AsyncMock(return_value=[])):
+            yield
+
     @pytest.mark.asyncio
     async def test_real_impacts_and_sentiment_both_land_on_the_right_article(self):
         articles = [_article("Rate cut expected"), _article("Nothing special")]
@@ -417,3 +432,137 @@ class TestGetMarketNewsResult:
 
         # Retried on the very next call rather than replaying a cached failure.
         assert fetch.await_count == 2
+
+
+class TestYfToArticle:
+    def test_it_maps_onto_newsapi_shape(self):
+        result = news._yf_to_article({
+            "title": "Gold rallies", "summary": "On Fed bets", "url": "https://y.com/1",
+            "published_at": "2026-09-08T01:47:00Z", "publisher": "Reuters",
+        })
+        assert result == {
+            "title": "Gold rallies", "description": "On Fed bets", "url": "https://y.com/1",
+            "publishedAt": "2026-09-08T01:47:00Z", "source": {"name": "Reuters"},
+        }
+
+    def test_the_older_payload_shape_epoch_seconds_becomes_an_iso_string(self):
+        result = news._yf_to_article({"title": "T", "published_at": 1757300820})
+        assert result["publishedAt"].startswith("2025-") or result["publishedAt"].startswith("2026-")
+        assert "T" in result["publishedAt"]
+
+    def test_a_missing_publisher_falls_back_rather_than_reading_as_blank(self):
+        assert news._yf_to_article({"title": "T"})["source"]["name"] == "Yahoo Finance"
+
+
+class TestMergeSources:
+    def _at(self, title, when):
+        return {"title": title, "url": f"https://x.com/{title}", "publishedAt": when}
+
+    def test_newest_first_across_both_sources(self):
+        newsapi = [self._at("old", "2026-09-06T00:00:00Z")]
+        yf = [self._at("new", "2026-09-08T00:00:00Z")]
+        result = news._merge_sources(newsapi, yf, page_size=10)
+        assert [a["title"] for a in result] == ["new", "old"]
+
+    def test_the_same_story_from_both_sources_appears_once(self):
+        shared = {"title": "Fed holds", "url": "https://x.com/fed", "publishedAt": "2026-09-08T00:00:00Z"}
+        result = news._merge_sources([shared], [dict(shared)], page_size=10)
+        assert len(result) == 1
+
+    def test_an_unparseable_timestamp_sorts_last_but_is_not_dropped(self):
+        newsapi = [self._at("broken", "not-a-date")]
+        yf = [self._at("fine", "2026-09-08T00:00:00Z")]
+        result = news._merge_sources(newsapi, yf, page_size=10)
+        assert [a["title"] for a in result] == ["fine", "broken"]
+
+    def test_it_trims_to_page_size(self):
+        articles = [self._at(str(i), "2026-09-08T00:00:00Z") for i in range(10)]
+        assert len(news._merge_sources(articles, [], page_size=3)) == 3
+
+
+class TestTwoSources:
+    @pytest.mark.asyncio
+    async def test_yfinance_alone_still_produces_a_feed_when_newsapi_dies(self):
+        yf = [_article("Yahoo only")]
+        llm = FakeLlm(_response(json.dumps([{"affected": []}])))
+        with patch("app.market.news._fetch_newsapi", new=AsyncMock(side_effect=RuntimeError("boom"))), \
+             patch("app.market.news._fetch_yfinance", new=AsyncMock(return_value=yf)), \
+             patch("app.market.news._hf_sentiment_batch", new=AsyncMock(return_value=[("NEUTRAL", 0.0)])), \
+             patch("app.market.news.redis.from_url", return_value=_FakeRedis()):
+            result = await news.get_market_news_result(llm=llm)
+
+        assert result["count"] == 1
+        assert result["articles"][0]["headline"] == "Yahoo only"
+        assert result["degraded_reason"] != "news_unavailable"
+
+    @pytest.mark.asyncio
+    async def test_only_both_sources_failing_is_a_real_news_outage(self):
+        with patch("app.market.news._fetch_newsapi", new=AsyncMock(side_effect=RuntimeError("boom"))), \
+             patch("app.market.news._fetch_yfinance", new=AsyncMock(return_value=[])), \
+             patch("app.market.news.redis.from_url", return_value=_FakeRedis()):
+            result = await news.get_market_news_result()
+
+        assert result["degraded_reason"] == "news_unavailable"
+
+
+class TestImpactCacheAcrossRuns:
+    @pytest.mark.asyncio
+    async def test_an_already_analyzed_url_is_not_sent_to_the_llm_again(self):
+        articles = [_article("Seen before"), _article("Brand new")]
+        fake_redis = _FakeRedis()
+        fake_redis.store["news:impact:https://example.com/seen-before"] = json.dumps(
+            [{"symbol": "TCS", "direction": "up", "assetClass": "NSE", "reason": "cached"}]
+        ).encode()
+
+        llm = FakeLlm(_response(json.dumps([{"affected": []}])))
+        with patch("app.market.news.redis.from_url", return_value=fake_redis):
+            impacts, ok = await news._analyze_impacts_cached(llm, articles)
+
+        assert ok is True
+        assert impacts[0] == [{"symbol": "TCS", "direction": "up", "assetClass": "NSE", "reason": "cached"}]
+        assert impacts[1] == []
+        # Only the uncached article reached the model.
+        assert len(llm.calls) == 1
+        assert "Brand new" in llm.calls[0]["messages"][1]["content"]
+        assert "Seen before" not in llm.calls[0]["messages"][1]["content"]
+
+    @pytest.mark.asyncio
+    async def test_a_fresh_result_is_written_back_for_the_next_run(self):
+        articles = [_article("First run")]
+        fake_redis = _FakeRedis()
+        llm = FakeLlm(_response(json.dumps([
+            {"affected": [{"symbol": "INFY", "direction": "down", "assetClass": "NSE", "reason": "r"}]},
+        ])))
+        with patch("app.market.news.redis.from_url", return_value=fake_redis):
+            await news._analyze_impacts_cached(llm, articles)
+
+        stored = json.loads(fake_redis.store["news:impact:https://example.com/first-run"])
+        assert stored == [{"symbol": "INFY", "direction": "down", "assetClass": "NSE", "reason": "r"}]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_analysis_is_never_cached(self):
+        articles = [_article("Doomed")]
+        fake_redis = _FakeRedis()
+        broken = FakeLlm(_response("not json"))
+        with patch("app.market.news.redis.from_url", return_value=fake_redis):
+            impacts, ok = await news._analyze_impacts_cached(broken, articles)
+
+        assert ok is False
+        assert impacts == [None]
+        # Nothing written -- a transient failure must not be frozen in for the TTL.
+        assert fake_redis.store == {}
+
+    @pytest.mark.asyncio
+    async def test_a_dead_cache_degrades_to_analyzing_everything(self):
+        articles = [_article("Anything")]
+        llm = FakeLlm(_response(json.dumps([{"affected": []}])))
+
+        def _boom(*a, **k):
+            raise RuntimeError("redis down")
+
+        with patch("app.market.news.redis.from_url", new=_boom):
+            impacts, ok = await news._analyze_impacts_cached(llm, articles)
+
+        assert ok is True
+        assert impacts == [[]]
+        assert len(llm.calls) == 1

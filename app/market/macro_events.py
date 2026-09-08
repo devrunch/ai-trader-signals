@@ -149,7 +149,17 @@ def _fetch_yf_news(ticker: str) -> list[dict]:
                      if isinstance(content.get("provider"), dict) else None) or item.get("publisher")
         url = ((content.get("canonicalUrl") or {}).get("url")
                if isinstance(content.get("canonicalUrl"), dict) else None) or item.get("link")
-        out.append({"title": title, "publisher": publisher, "url": url})
+        # `published_at`/`summary` are here for news.py's own market feed,
+        # which needs a real timestamp to sort by and a description to give
+        # the impact analysis something beyond the headline. The brief's own
+        # caller ignores both -- extra keys, no behaviour change for it.
+        # providerPublishTime is the older flat shape's epoch-seconds field.
+        published_at = content.get("pubDate") or content.get("displayTime") or item.get("providerPublishTime")
+        summary = content.get("summary") or content.get("description") or ""
+        out.append({
+            "title": title, "publisher": publisher, "url": url,
+            "published_at": published_at, "summary": summary,
+        })
     return out
 
 
@@ -159,9 +169,14 @@ def _fetch_yf_news(ticker: str) -> list[dict]:
 _MACRO_NEWS_TICKERS = ["GC=F", "DX-Y.NYB", "^TNX"]
 
 
-async def yfinance_headlines() -> list[dict]:
-    """Free, no key, real headlines -- no invented summary."""
-    lists = await asyncio.gather(*(asyncio.to_thread(_fetch_yf_news, t) for t in _MACRO_NEWS_TICKERS))
+async def yfinance_headlines(tickers: list[str] | None = None) -> list[dict]:
+    """Free, no key, real headlines -- no invented summary.
+
+    `tickers` defaults to the macro trio the brief wants; news.py passes a
+    wider, asset-class-spanning set for the market feed. Yahoo attaches news
+    to a symbol, so the ticker list IS the topic selection.
+    """
+    lists = await asyncio.gather(*(asyncio.to_thread(_fetch_yf_news, t) for t in (tickers or _MACRO_NEWS_TICKERS)))
     seen_urls: set[str] = set()
     out: list[dict] = []
     for lst in lists:

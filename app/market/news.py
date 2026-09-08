@@ -17,6 +17,7 @@ import redis.asyncio as redis
 
 from app.config import get_settings
 from app.llm.client import LlmClient, get_llm
+from app.market import macro_events
 from app.signals.prompts import extract_json_text
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,14 @@ IMPACT_MAX_TOKENS = 4096
 # what is very likely the same headlines, so the full result (not just the
 # raw articles) is cached for a short, deliberately sub-"stale news" window.
 NEWS_CACHE_TTL_SECONDS = 5 * 60
+
+# How long one article's analyzed impact is remembered, keyed by its URL.
+# Comfortably longer than a story stays in a "latest headlines" pull, so a
+# multi-hour story is analyzed once across all the hourly pipeline ticks it
+# survives, not once per tick. Bounded rather than permanent because the
+# analysis prompt itself changes over time, and a stale prompt's answers
+# shouldn't outlive it by much.
+IMPACT_CACHE_TTL_SECONDS = 48 * 60 * 60
 
 
 # Restricting to real finance/markets outlets. Without this, an unrestricted
@@ -140,6 +149,90 @@ async def _fetch_newsapi(query: str, page_size: int = 20) -> list[dict]:
         r = await client.get(NEWSAPI_URL, params=params)
         r.raise_for_status()
         return _dedupe_articles(r.json().get("articles", []))[:page_size]
+
+
+# Yahoo attaches news to a symbol, so this ticker list IS the topic
+# selection -- one per asset class this app actually charts, so the feed
+# isn't skewed to any single market the way the NewsAPI query alone was.
+YF_NEWS_TICKERS = [
+    "^GSPC",      # US broad equities
+    "^IXIC",      # NASDAQ
+    "GC=F",       # gold
+    "BZ=F",       # Brent crude
+    "BTC-USD",    # crypto
+    "DX-Y.NYB",   # US dollar index
+    "^NSEI",      # Nifty 50
+    "USDINR=X",   # rupee
+]
+
+
+def _yf_to_article(item: dict) -> dict:
+    """Maps one yfinance news item onto NewsAPI's own article shape, so the
+    two sources merge into one list nothing downstream has to special-case.
+    `published_at` is already an ISO string on the current payload shape;
+    the older flat shape's epoch seconds are converted here."""
+    published = item.get("published_at")
+    if isinstance(published, (int, float)):
+        published = datetime.fromtimestamp(published, tz=UTC).isoformat()
+    return {
+        "title": item.get("title") or "",
+        "description": item.get("summary") or "",
+        "url": item.get("url") or "",
+        "publishedAt": published or "",
+        "source": {"name": item.get("publisher") or "Yahoo Finance"},
+    }
+
+
+async def _fetch_yfinance(page_size: int = 20) -> list[dict]:
+    """Yahoo Finance headlines, NewsAPI-shaped. Free, no key, and measured
+    at roughly an hour old at the freshest -- against NewsAPI's free tier,
+    which withholds every article for a full 24h, this is the fresher of
+    the two sources by a wide margin, which is the whole reason it's here."""
+    try:
+        items = await macro_events.yfinance_headlines(YF_NEWS_TICKERS)
+    except Exception:
+        # yfinance scrapes an undocumented endpoint; a shape change there
+        # must degrade to "no yfinance articles this run", never take the
+        # whole feed down with it -- NewsAPI's half still stands alone.
+        logger.exception("yfinance news fetch failed")
+        return []
+    return [a for a in (_yf_to_article(i) for i in items) if a["title"]][:page_size]
+
+
+async def _fetch_newsapi_safe(query: str, page_size: int) -> list[dict] | None:
+    """`_fetch_newsapi`, but returns None instead of raising, so one dead
+    source can't take the other's articles down with it. None means
+    "couldn't fetch"; an empty list means "fetched, nothing matched"."""
+    try:
+        return await _fetch_newsapi(query, page_size)
+    except _API_ERRORS as e:
+        logger.warning("NewsAPI fetch failed: %s", e)
+        return None
+    except Exception:
+        logger.exception("Unexpected error fetching news for query %r", query)
+        return None
+
+
+def _merge_sources(newsapi: list[dict], yfinance_articles: list[dict], page_size: int) -> list[dict]:
+    """Newest first across both sources, deduped, trimmed to page_size.
+
+    Sorted on the real publish timestamp rather than interleaving by
+    source: with NewsAPI's free tier holding everything 24h and yfinance
+    running about an hour behind live, a plain interleave would put
+    day-old articles above hour-old ones on the page. An unparseable or
+    missing timestamp sorts last rather than being dropped -- a real
+    headline is worth more than its position.
+    """
+    def sort_key(a: dict) -> tuple[int, float]:
+        raw = a.get("publishedAt") or ""
+        try:
+            return (0, -datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp())
+        except (ValueError, AttributeError, TypeError):
+            return (1, 0.0)
+
+    merged = _dedupe_articles([*newsapi, *yfinance_articles])
+    merged.sort(key=sort_key)
+    return merged[:page_size]
 
 
 async def _hf_sentiment_batch(texts: list[str]) -> list[tuple[str, float]] | None:
@@ -353,6 +446,73 @@ async def _analyze_impacts(llm: LlmClient, articles: list[dict]) -> list[list[di
     return combined
 
 
+async def _analyze_impacts_cached(
+    llm: LlmClient, articles: list[dict],
+) -> tuple[list[list[dict] | None], bool]:
+    """`_analyze_impacts`, but each article's result is remembered by URL
+    for IMPACT_CACHE_TTL_SECONDS.
+
+    The pipeline re-fetches the same still-running story every hour, and
+    the same headline text cannot honestly produce a different answer an
+    hour later -- so re-analyzing it was pure repeat spend, the single
+    biggest avoidable LLM cost here. A story already seen still SHOWS
+    (it's still current news); it just isn't paid for twice.
+
+    Returns `(per-article impacts, analysis_ok)`. An article whose entry is
+    None could not be analyzed; `analysis_ok` is False when any article
+    needed fresh analysis and did not get it. A failed analysis is never
+    cached -- only a real result, so a transient failure doesn't get
+    frozen in for two days.
+    """
+    settings = get_settings()
+    impacts: list[list[dict] | None] = [None] * len(articles)
+    keys = [f"news:impact:{a.get('url')}" if a.get("url") else None for a in articles]
+
+    r = None
+    try:
+        r = redis.from_url(settings.redis_url)
+        real_keys = [k for k in keys if k]
+        cached_values = await r.mget(real_keys) if real_keys else []
+        by_key = dict(zip(real_keys, cached_values, strict=True))
+        for i, key in enumerate(keys):
+            raw = by_key.get(key) if key else None
+            if raw:
+                try:
+                    impacts[i] = json.loads(raw)
+                except (json.JSONDecodeError, TypeError):
+                    impacts[i] = None
+    except Exception as e:
+        # A cache read failing must degrade to "analyze everything fresh",
+        # never to a dead feed -- this is a cost saving, not a dependency.
+        logger.warning("Impact cache read failed: %s", e)
+
+    pending = [i for i, v in enumerate(impacts) if v is None]
+    analysis_ok = True
+    if pending:
+        fresh = await _analyze_impacts(llm, [articles[i] for i in pending])
+        if fresh is None:
+            analysis_ok = False
+        else:
+            for i, value in zip(pending, fresh, strict=True):
+                impacts[i] = value
+            if r is not None:
+                try:
+                    for i in pending:
+                        if keys[i]:
+                            await r.set(keys[i], json.dumps(impacts[i]), ex=IMPACT_CACHE_TTL_SECONDS)
+                except Exception as e:
+                    logger.warning("Impact cache write failed: %s", e)
+
+    if r is not None:
+        try:
+            await r.aclose()
+        except Exception:
+            logger.debug("Impact cache close failed", exc_info=True)
+
+    logger.info("Impact analysis: %d cached, %d freshly analyzed", len(articles) - len(pending), len(pending))
+    return impacts, analysis_ok
+
+
 async def get_market_news_result(
     symbols: list[str] | None = None, page_size: int = 15, llm: LlmClient | None = None,
 ) -> dict:
@@ -360,6 +520,12 @@ async def get_market_news_result(
     Fetch market news, score sentiment, and analyze real per-headline stock
     impact -- reporting what failed at each stage rather than silently
     degrading to something that looks like a normal result.
+
+    News comes from two independent sources merged newest-first (NewsAPI
+    and Yahoo Finance via yfinance); either one failing leaves the other's
+    articles standing. Impact analysis is cached per article URL, so a
+    story that survives several hourly pipeline ticks is analyzed once --
+    see _analyze_impacts_cached.
 
     symbols: optional list to narrow query (e.g. ["RELIANCE", "INFY"])
 
@@ -397,27 +563,30 @@ async def get_market_news_result(
     finally:
         await r.aclose()
 
-    try:
-        articles = await _fetch_newsapi(query, page_size)
-    except _API_ERRORS as e:
-        logger.warning("NewsAPI fetch failed: %s", e)
+    # Two independent sources, fetched concurrently: NewsAPI (broad, but its
+    # free tier withholds every article 24h) and Yahoo Finance via yfinance
+    # (measured ~1h old at the freshest, no key, no embargo). Either one
+    # failing leaves the other's articles standing -- only both coming back
+    # empty is a real "no news".
+    newsapi_articles, yf_articles = await asyncio.gather(
+        _fetch_newsapi_safe(query, page_size),
+        _fetch_yfinance(page_size),
+    )
+    if newsapi_articles is None and not yf_articles:
         return {"articles": [], "count": 0, "degraded": True, "degraded_reason": "news_unavailable"}
-    except Exception:
-        logger.exception("Unexpected error fetching news for query %r", query)
+
+    articles = _merge_sources(newsapi_articles or [], yf_articles, page_size)
+    if not articles:
         return {"articles": [], "count": 0, "degraded": True, "degraded_reason": "news_unavailable"}
 
     texts = [f"{a.get('title') or ''}. {a.get('description') or ''}" for a in articles]
     llm = llm or get_llm()
     sentiment_task = _hf_sentiment_batch(texts)
-    impacts_task = _analyze_impacts(llm, articles)
-    scored, impacts_by_article = await asyncio.gather(sentiment_task, impacts_task)
+    impacts_task = _analyze_impacts_cached(llm, articles)
+    scored, (impacts_list, impacts_ok) = await asyncio.gather(sentiment_task, impacts_task)
 
     sentiment_ok = scored is not None
     sentiments: list[tuple[str, float]] = scored if scored is not None else [("NEUTRAL", 0.0)] * len(texts)
-    impacts_ok = impacts_by_article is not None
-    impacts_list: list[list[dict] | None] = (
-        list(impacts_by_article) if impacts_by_article is not None else [None] * len(articles)
-    )
 
     results = []
     # strict=True: both fallback lists above are built to match `articles`'
