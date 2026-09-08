@@ -78,21 +78,60 @@ IMPACT_MAX_TOKENS = 4096
 NEWS_CACHE_TTL_SECONDS = 5 * 60
 
 
+# Restricting to real finance/markets outlets. Without this, an unrestricted
+# `q` match pulled roughly a quarter junk -- a Bigg Boss episode recap, a
+# phone launch, a road accident -- all matching incidentally on a common word
+# like "dollar", "gold" or "prices". That junk is invisible on the Home page
+# (which shows only headlines with a real impact) but it still burns an LLM
+# impact-analysis slot each, and clutters the News tab's own "All" list.
+FINANCE_DOMAINS = ",".join([
+    "reuters.com", "bloomberg.com", "cnbc.com", "ft.com", "marketwatch.com",
+    "investing.com", "finance.yahoo.com", "businessinsider.com", "forbes.com",
+    "economictimes.indiatimes.com", "moneycontrol.com", "livemint.com",
+    "business-standard.com", "thehindubusinessline.com", "financialexpress.com",
+])
+
+
+def _dedupe_articles(articles: list[dict]) -> list[dict]:
+    """Same story, syndicated to two outlets (or served twice by NewsAPI
+    itself -- confirmed live), is one headline to a reader and one wasted
+    impact-analysis slot to us. Keyed on url first, then on the headline
+    itself for the syndicated case where the urls differ."""
+    seen_urls: set[str] = set()
+    seen_titles: set[str] = set()
+    out: list[dict] = []
+    for a in articles:
+        url = (a.get("url") or "").strip()
+        title = (a.get("title") or "").strip().lower()
+        if (url and url in seen_urls) or (title and title in seen_titles):
+            continue
+        if url:
+            seen_urls.add(url)
+        if title:
+            seen_titles.add(title)
+        out.append(a)
+    return out
+
+
 async def _fetch_newsapi(query: str, page_size: int = 20) -> list[dict]:
     settings = get_settings()
     if not settings.news_api_key:
         return []
     params: dict[str, str | int] = {
         "q": query,
+        "domains": FINANCE_DOMAINS,
         "language": "en",
         "sortBy": "publishedAt",
-        "pageSize": page_size,
+        # Over-fetch, since deduping below only ever removes articles and a
+        # short page is worse than a slightly wider net -- NewsAPI charges
+        # one request either way, and pageSize is not itself metered.
+        "pageSize": min(page_size * 2, 100),
         "apiKey": settings.news_api_key,
     }
     async with httpx.AsyncClient(timeout=10) as client:
         r = await client.get(NEWSAPI_URL, params=params)
         r.raise_for_status()
-        return r.json().get("articles", [])
+        return _dedupe_articles(r.json().get("articles", []))[:page_size]
 
 
 async def _hf_sentiment_batch(texts: list[str]) -> list[tuple[str, float]] | None:

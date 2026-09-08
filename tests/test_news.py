@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import re
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -51,6 +51,86 @@ class _FakeRedis:
 
     async def aclose(self):
         pass
+
+
+class TestDedupeArticles:
+    def test_the_same_url_twice_is_kept_once(self):
+        articles = [
+            {"title": "A", "url": "https://x.com/1"},
+            {"title": "B", "url": "https://x.com/1"},
+        ]
+        assert news._dedupe_articles(articles) == [{"title": "A", "url": "https://x.com/1"}]
+
+    def test_a_syndicated_story_under_two_urls_is_kept_once(self):
+        # Confirmed live: NewsAPI served "US Stock Market: Equity funds see
+        # second straight week of outflows" twice in one page.
+        articles = [
+            {"title": "Equity funds see outflows", "url": "https://a.com/1"},
+            {"title": "equity funds see outflows", "url": "https://b.com/2"},
+        ]
+        result = news._dedupe_articles(articles)
+        assert len(result) == 1
+        assert result[0]["url"] == "https://a.com/1"
+
+    def test_genuinely_different_articles_all_survive(self):
+        articles = [
+            {"title": "A", "url": "https://x.com/1"},
+            {"title": "B", "url": "https://x.com/2"},
+        ]
+        assert len(news._dedupe_articles(articles)) == 2
+
+    def test_articles_missing_a_url_or_title_are_not_collapsed_together(self):
+        # Two untitled, unlinked articles are not evidence of a duplicate --
+        # dropping one would lose a real headline on a technicality.
+        articles = [{"description": "one"}, {"description": "two"}]
+        assert len(news._dedupe_articles(articles)) == 2
+
+
+class TestFetchNewsapi:
+    @pytest.mark.asyncio
+    async def test_it_restricts_to_finance_domains_and_dedupes_to_page_size(self):
+        raw = {"articles": [
+            {"title": "A", "url": "https://x.com/1"},
+            {"title": "A", "url": "https://x.com/1"},  # dupe
+            {"title": "B", "url": "https://x.com/2"},
+            {"title": "C", "url": "https://x.com/3"},
+        ]}
+        captured: dict = {}
+
+        class _Resp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return raw
+
+        class _Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def get(self, url, params=None):
+                captured.update(params or {})
+                return _Resp()
+
+        settings = MagicMock()
+        settings.news_api_key = "k"
+        with patch("app.market.news.get_settings", return_value=settings), \
+             patch("app.market.news.httpx.AsyncClient", return_value=_Client()):
+            result = await news._fetch_newsapi("q", page_size=2)
+
+        assert [a["title"] for a in result] == ["A", "B"]  # deduped, then capped at page_size
+        assert "reuters.com" in captured["domains"]
+        assert captured["pageSize"] == 4  # over-fetched (page_size * 2) before deduping
+
+    @pytest.mark.asyncio
+    async def test_no_api_key_returns_empty_without_a_request(self):
+        settings = MagicMock()
+        settings.news_api_key = ""
+        with patch("app.market.news.get_settings", return_value=settings):
+            assert await news._fetch_newsapi("q") == []
 
 
 class TestParseImpactResponse:
