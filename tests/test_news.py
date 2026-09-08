@@ -92,6 +92,22 @@ class TestDedupeArticles:
         assert len(news._dedupe_articles(articles)) == 2
 
 
+class TestFinanceDomains:
+    def test_no_duplicates(self):
+        # A hand-maintained grouped list makes it easy to add the same
+        # outlet under two headings (cnbc.com was in both "markets" and
+        # "wires" on the first draft of the expanded list).
+        dupes = {d for d in news._FINANCE_DOMAIN_LIST if news._FINANCE_DOMAIN_LIST.count(d) > 1}
+        assert dupes == set()
+
+    def test_entries_are_bare_hostnames(self):
+        # NewsAPI's `domains` wants hostnames, not URLs -- a scheme or a
+        # path silently matches nothing rather than erroring.
+        for d in news._FINANCE_DOMAIN_LIST:
+            assert "/" not in d and ":" not in d, d
+            assert "." in d, d
+
+
 class TestFetchNewsapi:
     @pytest.mark.asyncio
     async def test_it_restricts_to_finance_domains_and_dedupes_to_page_size(self):

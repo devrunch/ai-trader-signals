@@ -101,12 +101,33 @@ IMPACT_CACHE_TTL_SECONDS = 48 * 60 * 60
 # more densely than Reuters/Bloomberg, both of which restrict their
 # NewsAPI availability. India still reaches the feed through global desks
 # covering it, plus Nifty/Sensex in DEFAULT_MARKET_QUERY.
-FINANCE_DOMAINS = ",".join([
+#
+# Deliberately finance-dedicated outlets rather than general-news ones.
+# General desks (a BBC, a Guardian) carry huge non-finance sections that
+# the query's own common words -- "dollar", "gold", "prices" -- match
+# constantly, which is exactly where the junk came from before. The
+# general-interest names still in this list (Business Insider, Forbes,
+# Fortune) are the remaining source of it.
+_FINANCE_DOMAIN_LIST = [
+    # Markets / equities desks
     "cnbc.com", "marketwatch.com", "investing.com", "finance.yahoo.com",
-    "businessinsider.com", "forbes.com", "fortune.com", "barrons.com",
-    "seekingalpha.com", "benzinga.com", "reuters.com", "bloomberg.com",
-    "ft.com", "coindesk.com", "oilprice.com", "kitco.com", "fxstreet.com",
-])
+    "barrons.com", "seekingalpha.com", "benzinga.com", "thestreet.com",
+    "fool.com", "nasdaq.com", "investors.com", "morningstar.com",
+    "barchart.com", "stocktwits.com", "insidermonkey.com", "zacks.com",
+    "247wallst.com", "schaeffersresearch.com", "tipranks.com",
+    "marketbeat.com", "streetinsider.com", "finbold.com",
+    # Wires / global business
+    "reuters.com", "bloomberg.com", "ft.com", "wsj.com", "economist.com",
+    "businessinsider.com", "forbes.com", "fortune.com", "axios.com", "qz.com",
+    # Crypto
+    "coindesk.com", "cointelegraph.com", "decrypt.co", "theblock.co",
+    "cryptoslate.com", "bitcoinist.com", "cryptobriefing.com",
+    # FX, commodities, energy, metals
+    "oilprice.com", "kitco.com", "fxstreet.com", "fxempire.com",
+    "dailyfx.com", "mining.com", "rigzone.com", "agweb.com",
+]
+
+FINANCE_DOMAINS = ",".join(_FINANCE_DOMAIN_LIST)
 
 
 def _dedupe_articles(articles: list[dict]) -> list[dict]:
