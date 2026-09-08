@@ -324,7 +324,12 @@ async def _fetch_newsdata(page_size: int = 20) -> list[dict]:
 # so an hourly pipeline (24/day) would sit one request from the ceiling
 # with nothing left for a retry or a manual run. Hence the cache below.
 ALPHAVANTAGE_URL = "https://www.alphavantage.co/query"
-ALPHAVANTAGE_TOPICS = "financial_markets,economy_macro,economy_monetary"
+# One topic, not three. A/B'd against the live API: `financial_markets`
+# alone returns ~1h-old items from MarketBeat/Yahoo/CNBC/Benzinga, while
+# adding economy_macro,economy_monetary returned ~8h-old items that were
+# entirely Kalkine Media content-farm pieces. More topics is strictly
+# worse here on both freshness and source quality.
+ALPHAVANTAGE_TOPICS = "financial_markets"
 ALPHAVANTAGE_CACHE_KEY = "news:alphavantage:latest"
 # Halves the hourly pipeline's usage to ~12/day, and -- the real point --
 # means a manual or debug run reuses the last response instead of eating
