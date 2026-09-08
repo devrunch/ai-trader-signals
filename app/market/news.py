@@ -318,6 +318,114 @@ async def _fetch_newsdata(page_size: int = 20) -> list[dict]:
     return [a for a in (_newsdata_to_article(i) for i in results) if a["title"]][:page_size]
 
 
+# Alpha Vantage. The freshest keyed source measured (~1h old, comparable to
+# yfinance) and it ships its own sentiment and per-ticker relevance. Its
+# free tier is the tightest of the lot though -- 25 requests/DAY, 5/min --
+# so an hourly pipeline (24/day) would sit one request from the ceiling
+# with nothing left for a retry or a manual run. Hence the cache below.
+ALPHAVANTAGE_URL = "https://www.alphavantage.co/query"
+ALPHAVANTAGE_TOPICS = "financial_markets,economy_macro,economy_monetary"
+ALPHAVANTAGE_CACHE_KEY = "news:alphavantage:latest"
+# Halves the hourly pipeline's usage to ~12/day, and -- the real point --
+# means a manual or debug run reuses the last response instead of eating
+# into a 25/day budget that has no slack.
+ALPHAVANTAGE_CACHE_TTL_SECONDS = 2 * 60 * 60
+
+
+def _alphavantage_to_article(item: dict) -> dict:
+    """Maps one Alpha Vantage feed item onto NewsAPI's article shape.
+
+    Its own `overall_sentiment_label`/`ticker_sentiment` are deliberately
+    NOT carried through: FinBERT scores every article in this feed, and
+    mixing a second scorer's labels in for one source's articles only
+    would make the sentiment column mean two different things depending
+    on where the headline came from.
+    """
+    published = (item.get("time_published") or "").strip()
+    if published:
+        try:
+            published = datetime.strptime(published, "%Y%m%dT%H%M%S").replace(tzinfo=UTC).isoformat()
+        except ValueError:
+            pass  # keep as-is; _merge_sources sorts unparseable dates last
+    return {
+        "title": item.get("title") or "",
+        "description": item.get("summary") or "",
+        "url": item.get("url") or "",
+        "publishedAt": published,
+        "source": {"name": item.get("source") or "Alpha Vantage"},
+    }
+
+
+async def _fetch_alphavantage(page_size: int = 20) -> list[dict]:
+    """Alpha Vantage market news, NewsAPI-shaped, behind a 2h Redis cache.
+
+    Returns [] when no key is configured. A cache failure degrades to a
+    real fetch rather than to no news -- but note that makes the 25/day
+    budget the thing at risk, so the cache is load-bearing here in a way
+    the others are not.
+    """
+    settings = get_settings()
+    if not settings.alphavantage_api_key:
+        return []
+
+    try:
+        r = redis.from_url(settings.redis_url)
+    except Exception as e:
+        logger.warning("Alpha Vantage cache unavailable: %s", e)
+        r = None
+
+    try:
+        if r is not None:
+            try:
+                cached = await r.get(ALPHAVANTAGE_CACHE_KEY)
+                if cached:
+                    return json.loads(cached)[:page_size]
+            except Exception as e:
+                logger.warning("Alpha Vantage cache read failed: %s", e)
+
+        params = {
+            "function": "NEWS_SENTIMENT",
+            "topics": ALPHAVANTAGE_TOPICS,
+            "sort": "LATEST",
+            "apikey": settings.alphavantage_api_key,
+        }
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(ALPHAVANTAGE_URL, params=params)
+            resp.raise_for_status()
+            payload = resp.json()
+
+        feed = payload.get("feed")
+        if not isinstance(feed, list):
+            # Alpha Vantage reports throttling and key problems in-band with
+            # HTTP 200, under "Note" / "Information" / "Error Message".
+            detail = payload.get("Note") or payload.get("Information") or payload.get("Error Message")
+            logger.warning("Alpha Vantage returned no feed: %s", str(detail or payload)[:200])
+            return []
+
+        articles = [a for a in (_alphavantage_to_article(i) for i in feed) if a["title"]]
+        if r is not None and articles:
+            try:
+                await r.set(ALPHAVANTAGE_CACHE_KEY, json.dumps(articles), ex=ALPHAVANTAGE_CACHE_TTL_SECONDS)
+            except Exception as e:
+                logger.warning("Alpha Vantage cache write failed: %s", e)
+        return articles[:page_size]
+    finally:
+        if r is not None:
+            try:
+                await r.aclose()
+            except Exception:
+                logger.debug("Alpha Vantage cache close failed", exc_info=True)
+
+
+async def _fetch_alphavantage_safe(page_size: int) -> list[dict]:
+    """Never lets an Alpha Vantage failure reach the other sources."""
+    try:
+        return await _fetch_alphavantage(page_size)
+    except Exception:
+        logger.exception("Alpha Vantage fetch failed")
+        return []
+
+
 async def _fetch_newsdata_safe(page_size: int) -> list[dict]:
     """Never lets a newsdata failure reach the other two sources."""
     try:
@@ -662,9 +770,9 @@ async def get_market_news_result(
     impact -- reporting what failed at each stage rather than silently
     degrading to something that looks like a normal result.
 
-    News comes from three independent sources merged newest-first
-    (yfinance, NewsAPI, newsdata.io); any one failing leaves the rest
-    standing. Impact analysis is cached per article URL, so a story that
+    News comes from four independent sources merged newest-first
+    (yfinance, Alpha Vantage, NewsAPI, newsdata.io); any one failing
+    leaves the rest standing. Impact analysis is cached per article URL, so a story that
     survives several hourly pipeline ticks is analyzed once -- see
     _analyze_impacts_cached.
 
@@ -704,21 +812,24 @@ async def get_market_news_result(
     finally:
         await r.aclose()
 
-    # Three independent sources, fetched concurrently, each covering the
-    # others' gaps: yfinance (freshest, ~1h, no key), NewsAPI (broadest
-    # domain list, but its free tier withholds everything 24h), and
-    # newsdata.io (12h, and the only one of the three whose index actually
-    # carries Reuters/Bloomberg/Barron's). Any one failing leaves the rest
-    # standing -- only all three coming back empty is a real "no news".
-    newsapi_articles, yf_articles, newsdata_articles = await asyncio.gather(
+    # Four independent sources, fetched concurrently, each covering the
+    # others' gaps: yfinance and Alpha Vantage (freshest, ~1h), NewsAPI
+    # (broadest domain list, but its free tier withholds everything 24h),
+    # and newsdata.io (12h, and the only one whose index actually carries
+    # Reuters/Bloomberg/Barron's). Any one failing leaves the rest
+    # standing -- only all four coming back empty is a real "no news".
+    newsapi_articles, yf_articles, newsdata_articles, av_articles = await asyncio.gather(
         _fetch_newsapi_safe(query, page_size),
         _fetch_yfinance(page_size),
         _fetch_newsdata_safe(page_size),
+        _fetch_alphavantage_safe(page_size),
     )
-    if newsapi_articles is None and not yf_articles and not newsdata_articles:
+    if newsapi_articles is None and not yf_articles and not newsdata_articles and not av_articles:
         return {"articles": [], "count": 0, "degraded": True, "degraded_reason": "news_unavailable"}
 
-    articles = _merge_sources([newsapi_articles or [], yf_articles, newsdata_articles], page_size)
+    articles = _merge_sources(
+        [newsapi_articles or [], yf_articles, newsdata_articles, av_articles], page_size,
+    )
     if not articles:
         return {"articles": [], "count": 0, "degraded": True, "degraded_reason": "news_unavailable"}
 

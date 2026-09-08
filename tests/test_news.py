@@ -416,7 +416,8 @@ class TestGetMarketNewsResult:
         The merge itself has its own cases in TestMergeSources /
         TestSourceIndependence below."""
         with patch("app.market.news._fetch_yfinance", new=AsyncMock(return_value=[])), \
-             patch("app.market.news._fetch_newsdata_safe", new=AsyncMock(return_value=[])):
+             patch("app.market.news._fetch_newsdata_safe", new=AsyncMock(return_value=[])), \
+             patch("app.market.news._fetch_alphavantage_safe", new=AsyncMock(return_value=[])):
             yield
 
     @pytest.mark.asyncio
@@ -605,6 +606,105 @@ class TestNewsdata:
         assert len(news.NEWSDATA_DOMAINS.split(",")) <= 5
 
 
+class TestAlphaVantage:
+    def _payload(self, n=2):
+        return {"feed": [
+            {"title": f"AV {i}", "summary": "s", "url": f"https://av.co/{i}",
+             "time_published": "20260908T042705", "source": "CNBC"}
+            for i in range(n)
+        ]}
+
+    def _client(self, payload, captured=None):
+        class _Resp:
+            def raise_for_status(self): pass
+            def json(self): return payload
+
+        class _Client:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def get(self, url, params=None):
+                if captured is not None:
+                    captured.update(params or {})
+                return _Resp()
+        return _Client()
+
+    def test_it_maps_onto_newsapi_shape_and_normalises_the_timestamp(self):
+        result = news._alphavantage_to_article({
+            "title": "Oil up", "summary": "Iran", "url": "https://av.co/1",
+            "time_published": "20260908T042705", "source": "CNBC",
+        })
+        assert result == {
+            "title": "Oil up", "description": "Iran", "url": "https://av.co/1",
+            "publishedAt": "2026-09-08T04:27:05+00:00", "source": {"name": "CNBC"},
+        }
+
+    @pytest.mark.asyncio
+    async def test_no_key_means_the_source_is_simply_absent(self):
+        settings = MagicMock()
+        settings.alphavantage_api_key = ""
+        with patch("app.market.news.get_settings", return_value=settings):
+            assert await news._fetch_alphavantage() == []
+
+    @pytest.mark.asyncio
+    async def test_a_second_call_is_served_from_cache_not_the_api(self):
+        # The whole point: the free tier is 25 requests/DAY, and an hourly
+        # pipeline plus any manual run would blow straight through it.
+        fake_redis = _FakeRedis()
+        settings = MagicMock()
+        settings.alphavantage_api_key = "k"
+        settings.redis_url = "redis://fake"
+        calls = {"n": 0}
+
+        class _CountingClient:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def get(self, url, params=None):
+                calls["n"] += 1
+                class _R:
+                    def raise_for_status(self): pass
+                    def json(_self): return {"feed": [{"title": "AV", "url": "https://av.co/1",
+                                                       "time_published": "20260908T042705"}]}
+                return _R()
+
+        with patch("app.market.news.get_settings", return_value=settings), \
+             patch("app.market.news.redis.from_url", return_value=fake_redis), \
+             patch("app.market.news.httpx.AsyncClient", side_effect=lambda **kw: _CountingClient()):
+            first = await news._fetch_alphavantage()
+            second = await news._fetch_alphavantage()
+
+        assert first == second
+        assert calls["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_an_in_band_throttle_note_is_not_treated_as_articles(self):
+        # Alpha Vantage reports throttling with HTTP 200 and a "Note" key.
+        settings = MagicMock()
+        settings.alphavantage_api_key = "k"
+        settings.redis_url = "redis://fake"
+        payload = {"Note": "Thank you for using Alpha Vantage! Our standard API rate limit is 25 requests per day."}
+        with patch("app.market.news.get_settings", return_value=settings), \
+             patch("app.market.news.redis.from_url", return_value=_FakeRedis()), \
+             patch("app.market.news.httpx.AsyncClient", return_value=self._client(payload)):
+            assert await news._fetch_alphavantage() == []
+
+    @pytest.mark.asyncio
+    async def test_a_throttled_response_is_never_cached(self):
+        fake_redis = _FakeRedis()
+        settings = MagicMock()
+        settings.alphavantage_api_key = "k"
+        settings.redis_url = "redis://fake"
+        with patch("app.market.news.get_settings", return_value=settings), \
+             patch("app.market.news.redis.from_url", return_value=fake_redis), \
+             patch("app.market.news.httpx.AsyncClient", return_value=self._client({"Note": "limit"})):
+            await news._fetch_alphavantage()
+        assert fake_redis.store == {}
+
+    @pytest.mark.asyncio
+    async def test_a_failure_never_reaches_the_other_sources(self):
+        with patch("app.market.news._fetch_alphavantage", new=AsyncMock(side_effect=RuntimeError("boom"))):
+            assert await news._fetch_alphavantage_safe(10) == []
+
+
 class TestSourceIndependence:
     @pytest.mark.asyncio
     async def test_one_surviving_source_still_produces_a_feed(self):
@@ -636,10 +736,11 @@ class TestSourceIndependence:
         assert result["articles"][0]["headline"] == "Reuters via newsdata"
 
     @pytest.mark.asyncio
-    async def test_only_all_three_failing_is_a_real_news_outage(self):
+    async def test_only_all_four_failing_is_a_real_news_outage(self):
         with patch("app.market.news._fetch_newsapi", new=AsyncMock(side_effect=RuntimeError("boom"))), \
              patch("app.market.news._fetch_yfinance", new=AsyncMock(return_value=[])), \
              patch("app.market.news._fetch_newsdata_safe", new=AsyncMock(return_value=[])), \
+             patch("app.market.news._fetch_alphavantage_safe", new=AsyncMock(return_value=[])), \
              patch("app.market.news.redis.from_url", return_value=_FakeRedis()):
             result = await news.get_market_news_result()
 

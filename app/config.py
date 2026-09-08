@@ -91,6 +91,11 @@ class Settings(BaseSettings):
 
     # Market data
     news_api_key: str = ""
+    # Alpha Vantage -- news WITH its own sentiment and per-ticker relevance.
+    # Freshest keyed source measured (~1h). Free tier is only 25 requests/DAY
+    # (5/min), which is why _fetch_alphavantage caches behind a 2h TTL rather
+    # than being called on every pipeline tick. Unset = source skipped.
+    alphavantage_api_key: str = ""
     # newsdata.io -- a second keyed news source alongside NewsAPI. Worth its
     # own key specifically because Reuters and Bloomberg ARE in its index,
     # and NewsAPI restricts both. Free tier: 200 credits/day, 12h delay,
