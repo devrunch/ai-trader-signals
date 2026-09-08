@@ -84,11 +84,19 @@ NEWS_CACHE_TTL_SECONDS = 5 * 60
 # like "dollar", "gold" or "prices". That junk is invisible on the Home page
 # (which shows only headlines with a real impact) but it still burns an LLM
 # impact-analysis slot each, and clutters the News tab's own "All" list.
+#
+# Deliberately no India-only outlets (Business Standard, BusinessLine,
+# Livemint, Moneycontrol, Economic Times). Including them buried the feed
+# in Indian coverage -- confirmed live, 21 of 25 headlines from three
+# Indian outlets in one pull -- because NewsAPI's index covers them far
+# more densely than Reuters/Bloomberg, both of which restrict their
+# NewsAPI availability. India still reaches the feed through global desks
+# covering it, plus Nifty/Sensex in DEFAULT_MARKET_QUERY.
 FINANCE_DOMAINS = ",".join([
-    "reuters.com", "bloomberg.com", "cnbc.com", "ft.com", "marketwatch.com",
-    "investing.com", "finance.yahoo.com", "businessinsider.com", "forbes.com",
-    "economictimes.indiatimes.com", "moneycontrol.com", "livemint.com",
-    "business-standard.com", "thehindubusinessline.com", "financialexpress.com",
+    "cnbc.com", "marketwatch.com", "investing.com", "finance.yahoo.com",
+    "businessinsider.com", "forbes.com", "fortune.com", "barrons.com",
+    "seekingalpha.com", "benzinga.com", "reuters.com", "bloomberg.com",
+    "ft.com", "coindesk.com", "oilprice.com", "kitco.com", "fxstreet.com",
 ])
 
 
