@@ -360,12 +360,15 @@ class TestAnalyzeImpactsChunking:
 
 class TestGetMarketNewsResult:
     @pytest.fixture(autouse=True)
-    def _no_yfinance(self):
+    def _only_newsapi(self):
         """These cases are about the NewsAPI half and the assembly around
         it. Without this the real yfinance source would run -- a live
-        network call inside a unit test. The merge itself has its own
-        cases in TestMergeSources / TestTwoSources below."""
-        with patch("app.market.news._fetch_yfinance", new=AsyncMock(return_value=[])):
+        network call inside a unit test. newsdata is pinned explicitly
+        too rather than relying on the test env happening to have no key.
+        The merge itself has its own cases in TestMergeSources /
+        TestSourceIndependence below."""
+        with patch("app.market.news._fetch_yfinance", new=AsyncMock(return_value=[])), \
+             patch("app.market.news._fetch_newsdata_safe", new=AsyncMock(return_value=[])):
             yield
 
     @pytest.mark.asyncio
@@ -474,35 +477,94 @@ class TestMergeSources:
     def _at(self, title, when):
         return {"title": title, "url": f"https://x.com/{title}", "publishedAt": when}
 
-    def test_newest_first_across_both_sources(self):
-        newsapi = [self._at("old", "2026-09-06T00:00:00Z")]
-        yf = [self._at("new", "2026-09-08T00:00:00Z")]
-        result = news._merge_sources(newsapi, yf, page_size=10)
-        assert [a["title"] for a in result] == ["new", "old"]
+    def test_newest_first_across_all_sources(self):
+        result = news._merge_sources([
+            [self._at("old", "2026-09-06T00:00:00Z")],       # NewsAPI, 24h lag
+            [self._at("new", "2026-09-08T06:00:00Z")],       # yfinance, ~1h lag
+            [self._at("middle", "2026-09-07T18:00:00Z")],    # newsdata, 12h lag
+        ], page_size=10)
+        assert [a["title"] for a in result] == ["new", "middle", "old"]
 
-    def test_the_same_story_from_both_sources_appears_once(self):
+    def test_the_same_story_from_two_sources_appears_once(self):
         shared = {"title": "Fed holds", "url": "https://x.com/fed", "publishedAt": "2026-09-08T00:00:00Z"}
-        result = news._merge_sources([shared], [dict(shared)], page_size=10)
+        result = news._merge_sources([[shared], [dict(shared)], []], page_size=10)
         assert len(result) == 1
 
     def test_an_unparseable_timestamp_sorts_last_but_is_not_dropped(self):
-        newsapi = [self._at("broken", "not-a-date")]
-        yf = [self._at("fine", "2026-09-08T00:00:00Z")]
-        result = news._merge_sources(newsapi, yf, page_size=10)
+        result = news._merge_sources([
+            [self._at("broken", "not-a-date")],
+            [self._at("fine", "2026-09-08T00:00:00Z")],
+        ], page_size=10)
         assert [a["title"] for a in result] == ["fine", "broken"]
 
     def test_it_trims_to_page_size(self):
         articles = [self._at(str(i), "2026-09-08T00:00:00Z") for i in range(10)]
-        assert len(news._merge_sources(articles, [], page_size=3)) == 3
+        assert len(news._merge_sources([articles, []], page_size=3)) == 3
 
 
-class TestTwoSources:
+class TestNewsdata:
+    def test_it_maps_onto_newsapi_shape_and_normalises_the_timestamp(self):
+        result = news._newsdata_to_article({
+            "title": "Oil rises", "description": "Iran tensions", "link": "https://n.io/1",
+            "pubDate": "2026-09-07 16:00:00", "source_name": "Reuters",
+        })
+        assert result == {
+            "title": "Oil rises", "description": "Iran tensions", "url": "https://n.io/1",
+            "publishedAt": "2026-09-07T16:00:00+00:00", "source": {"name": "Reuters"},
+        }
+
+    def test_an_unexpected_date_format_is_passed_through_not_dropped(self):
+        result = news._newsdata_to_article({"title": "T", "pubDate": "07/09/2026"})
+        assert result["publishedAt"] == "07/09/2026"
+
     @pytest.mark.asyncio
-    async def test_yfinance_alone_still_produces_a_feed_when_newsapi_dies(self):
+    async def test_no_key_means_the_source_is_simply_absent(self):
+        settings = MagicMock()
+        settings.newsdata_api_key = ""
+        with patch("app.market.news.get_settings", return_value=settings):
+            assert await news._fetch_newsdata() == []
+
+    @pytest.mark.asyncio
+    async def test_an_in_band_error_object_is_not_treated_as_articles(self):
+        # newsdata reports some failures with HTTP 200 and `results` as an
+        # error OBJECT rather than a list.
+        payload = {"status": "error", "results": {"message": "bad domain", "code": "UnsupportedFilter"}}
+
+        class _Resp:
+            def raise_for_status(self): pass
+            def json(self): return payload
+
+        class _Client:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def get(self, url, params=None): return _Resp()
+
+        settings = MagicMock()
+        settings.newsdata_api_key = "k"
+        with patch("app.market.news.get_settings", return_value=settings), \
+             patch("app.market.news.httpx.AsyncClient", return_value=_Client()):
+            assert await news._fetch_newsdata() == []
+
+    @pytest.mark.asyncio
+    async def test_a_failure_never_reaches_the_other_sources(self):
+        with patch("app.market.news._fetch_newsdata", new=AsyncMock(side_effect=RuntimeError("boom"))):
+            assert await news._fetch_newsdata_safe(10) == []
+
+    def test_the_query_fits_the_free_tier_100_char_cap(self):
+        assert len(news.NEWSDATA_QUERY) <= 100
+
+    def test_no_more_than_five_domains(self):
+        assert len(news.NEWSDATA_DOMAINS.split(",")) <= 5
+
+
+class TestSourceIndependence:
+    @pytest.mark.asyncio
+    async def test_one_surviving_source_still_produces_a_feed(self):
         yf = [_article("Yahoo only")]
         llm = FakeLlm(_response(json.dumps([{"affected": []}])))
         with patch("app.market.news._fetch_newsapi", new=AsyncMock(side_effect=RuntimeError("boom"))), \
              patch("app.market.news._fetch_yfinance", new=AsyncMock(return_value=yf)), \
+             patch("app.market.news._fetch_newsdata_safe", new=AsyncMock(return_value=[])), \
              patch("app.market.news._hf_sentiment_batch", new=AsyncMock(return_value=[("NEUTRAL", 0.0)])), \
              patch("app.market.news.redis.from_url", return_value=_FakeRedis()):
             result = await news.get_market_news_result(llm=llm)
@@ -512,9 +574,24 @@ class TestTwoSources:
         assert result["degraded_reason"] != "news_unavailable"
 
     @pytest.mark.asyncio
-    async def test_only_both_sources_failing_is_a_real_news_outage(self):
+    async def test_newsdata_alone_still_produces_a_feed(self):
+        nd = [_article("Reuters via newsdata")]
+        llm = FakeLlm(_response(json.dumps([{"affected": []}])))
         with patch("app.market.news._fetch_newsapi", new=AsyncMock(side_effect=RuntimeError("boom"))), \
              patch("app.market.news._fetch_yfinance", new=AsyncMock(return_value=[])), \
+             patch("app.market.news._fetch_newsdata_safe", new=AsyncMock(return_value=nd)), \
+             patch("app.market.news._hf_sentiment_batch", new=AsyncMock(return_value=[("NEUTRAL", 0.0)])), \
+             patch("app.market.news.redis.from_url", return_value=_FakeRedis()):
+            result = await news.get_market_news_result(llm=llm)
+
+        assert result["count"] == 1
+        assert result["articles"][0]["headline"] == "Reuters via newsdata"
+
+    @pytest.mark.asyncio
+    async def test_only_all_three_failing_is_a_real_news_outage(self):
+        with patch("app.market.news._fetch_newsapi", new=AsyncMock(side_effect=RuntimeError("boom"))), \
+             patch("app.market.news._fetch_yfinance", new=AsyncMock(return_value=[])), \
+             patch("app.market.news._fetch_newsdata_safe", new=AsyncMock(return_value=[])), \
              patch("app.market.news.redis.from_url", return_value=_FakeRedis()):
             result = await news.get_market_news_result()
 

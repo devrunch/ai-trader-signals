@@ -91,6 +91,11 @@ class Settings(BaseSettings):
 
     # Market data
     news_api_key: str = ""
+    # newsdata.io -- a second keyed news source alongside NewsAPI. Worth its
+    # own key specifically because Reuters and Bloomberg ARE in its index,
+    # and NewsAPI restricts both. Free tier: 200 credits/day, 12h delay,
+    # max 5 domains per query. Unset = the source is simply skipped.
+    newsdata_api_key: str = ""
     # Tavily (tavily.com) -- the chat agent's web_search tool. Unset = the
     # tool returns a clear "not configured" error rather than crashing the turn.
     tavily_api_key: str = ""

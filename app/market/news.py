@@ -234,15 +234,15 @@ async def _fetch_newsapi_safe(query: str, page_size: int) -> list[dict] | None:
         return None
 
 
-def _merge_sources(newsapi: list[dict], yfinance_articles: list[dict], page_size: int) -> list[dict]:
-    """Newest first across both sources, deduped, trimmed to page_size.
+def _merge_sources(sources: list[list[dict]], page_size: int) -> list[dict]:
+    """Newest first across every source, deduped, trimmed to page_size.
 
     Sorted on the real publish timestamp rather than interleaving by
-    source: with NewsAPI's free tier holding everything 24h and yfinance
-    running about an hour behind live, a plain interleave would put
-    day-old articles above hour-old ones on the page. An unparseable or
-    missing timestamp sorts last rather than being dropped -- a real
-    headline is worth more than its position.
+    source: the three sources run at very different lags (yfinance ~1h,
+    newsdata 12h, NewsAPI 24h), so a plain interleave would put day-old
+    articles above hour-old ones on the page. An unparseable or missing
+    timestamp sorts last rather than being dropped -- a real headline is
+    worth more than its position.
     """
     def sort_key(a: dict) -> tuple[int, float]:
         raw = a.get("publishedAt") or ""
@@ -251,9 +251,80 @@ def _merge_sources(newsapi: list[dict], yfinance_articles: list[dict], page_size
         except (ValueError, AttributeError, TypeError):
             return (1, 0.0)
 
-    merged = _dedupe_articles([*newsapi, *yfinance_articles])
+    merged = _dedupe_articles([a for source in sources for a in source])
     merged.sort(key=sort_key)
     return merged[:page_size]
+
+
+# newsdata.io. Worth a third source specifically because Reuters, Bloomberg
+# and Barron's ARE in its index and NewsAPI restricts all three -- confirmed
+# by probing its own database. Free tier: 200 credits/day (this pipeline
+# uses 24), 12h delay, and two hard caps that shape the config below --
+# max 5 domains, and a 100-character `q`.
+NEWSDATA_URL = "https://newsdata.io/api/1/latest"
+NEWSDATA_DOMAINS = "reuters.com,bloomberg.com,barrons.com,marketwatch.com,cnbc.com"
+# Deliberately short: the free tier rejects a `q` over 100 characters, so
+# this cannot be DEFAULT_MARKET_QUERY. Domain-filtering alone is NOT enough
+# here -- confirmed live that Reuters' own feed, unqueried, is mostly
+# sport and general news.
+NEWSDATA_QUERY = 'stocks OR inflation OR "Federal Reserve" OR gold OR crude OR bitcoin OR forex'
+
+
+def _newsdata_to_article(item: dict) -> dict:
+    """Maps one newsdata.io result onto NewsAPI's own article shape.
+    Its `pubDate` is "YYYY-MM-DD HH:MM:SS" in the zone named by
+    `pubDateTZ` (UTC in practice), not an ISO string -- normalised here so
+    _merge_sources can sort every source on one comparable timestamp."""
+    published = (item.get("pubDate") or "").strip()
+    if published:
+        try:
+            dt = datetime.strptime(published, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+            published = dt.isoformat()
+        except ValueError:
+            # Keep whatever it sent rather than dropping a real article over
+            # a format change; _merge_sources sorts unparseable dates last.
+            pass
+    return {
+        "title": item.get("title") or "",
+        "description": item.get("description") or "",
+        "url": item.get("link") or "",
+        "publishedAt": published,
+        "source": {"name": item.get("source_name") or "newsdata.io"},
+    }
+
+
+async def _fetch_newsdata(page_size: int = 20) -> list[dict]:
+    """newsdata.io headlines, NewsAPI-shaped. Returns [] when no key is
+    configured, so the source is simply absent rather than an error."""
+    settings = get_settings()
+    if not settings.newsdata_api_key:
+        return []
+    params = {
+        "apikey": settings.newsdata_api_key,
+        "language": "en",
+        "domainurl": NEWSDATA_DOMAINS,
+        "q": NEWSDATA_QUERY,
+    }
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.get(NEWSDATA_URL, params=params)
+        r.raise_for_status()
+        payload = r.json()
+    # newsdata reports its own failures in-band with HTTP 200 sometimes, and
+    # `results` is an error OBJECT rather than a list in that case.
+    results = payload.get("results")
+    if not isinstance(results, list):
+        logger.warning("newsdata.io returned no usable results: %s", str(results)[:200])
+        return []
+    return [a for a in (_newsdata_to_article(i) for i in results) if a["title"]][:page_size]
+
+
+async def _fetch_newsdata_safe(page_size: int) -> list[dict]:
+    """Never lets a newsdata failure reach the other two sources."""
+    try:
+        return await _fetch_newsdata(page_size)
+    except Exception:
+        logger.exception("newsdata.io fetch failed")
+        return []
 
 
 async def _hf_sentiment_batch(texts: list[str]) -> list[tuple[str, float]] | None:
@@ -542,11 +613,11 @@ async def get_market_news_result(
     impact -- reporting what failed at each stage rather than silently
     degrading to something that looks like a normal result.
 
-    News comes from two independent sources merged newest-first (NewsAPI
-    and Yahoo Finance via yfinance); either one failing leaves the other's
-    articles standing. Impact analysis is cached per article URL, so a
-    story that survives several hourly pipeline ticks is analyzed once --
-    see _analyze_impacts_cached.
+    News comes from three independent sources merged newest-first
+    (yfinance, NewsAPI, newsdata.io); any one failing leaves the rest
+    standing. Impact analysis is cached per article URL, so a story that
+    survives several hourly pipeline ticks is analyzed once -- see
+    _analyze_impacts_cached.
 
     symbols: optional list to narrow query (e.g. ["RELIANCE", "INFY"])
 
@@ -584,19 +655,21 @@ async def get_market_news_result(
     finally:
         await r.aclose()
 
-    # Two independent sources, fetched concurrently: NewsAPI (broad, but its
-    # free tier withholds every article 24h) and Yahoo Finance via yfinance
-    # (measured ~1h old at the freshest, no key, no embargo). Either one
-    # failing leaves the other's articles standing -- only both coming back
-    # empty is a real "no news".
-    newsapi_articles, yf_articles = await asyncio.gather(
+    # Three independent sources, fetched concurrently, each covering the
+    # others' gaps: yfinance (freshest, ~1h, no key), NewsAPI (broadest
+    # domain list, but its free tier withholds everything 24h), and
+    # newsdata.io (12h, and the only one of the three whose index actually
+    # carries Reuters/Bloomberg/Barron's). Any one failing leaves the rest
+    # standing -- only all three coming back empty is a real "no news".
+    newsapi_articles, yf_articles, newsdata_articles = await asyncio.gather(
         _fetch_newsapi_safe(query, page_size),
         _fetch_yfinance(page_size),
+        _fetch_newsdata_safe(page_size),
     )
-    if newsapi_articles is None and not yf_articles:
+    if newsapi_articles is None and not yf_articles and not newsdata_articles:
         return {"articles": [], "count": 0, "degraded": True, "degraded_reason": "news_unavailable"}
 
-    articles = _merge_sources(newsapi_articles or [], yf_articles, page_size)
+    articles = _merge_sources([newsapi_articles or [], yf_articles, newsdata_articles], page_size)
     if not articles:
         return {"articles": [], "count": 0, "degraded": True, "degraded_reason": "news_unavailable"}
 
