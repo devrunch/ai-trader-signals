@@ -327,6 +327,63 @@ async def _fetch_newsdata_safe(page_size: int) -> list[dict]:
         return []
 
 
+def _signed(label: str, score: float) -> tuple[str, float]:
+    """FinBERT's own label, with the score signed by direction so callers can
+    sort or average it: positive stays positive, negative goes below zero,
+    and neutral is exactly 0 regardless of how confident the model was."""
+    upper = label.upper()
+    if upper == "POSITIVE":
+        return (upper, score)
+    if upper == "NEGATIVE":
+        return (upper, -score)
+    return (upper, 0.0)
+
+
+def _parse_hf_sentiment(raw: object, n: int) -> list[tuple[str, float]] | None:
+    """HF's inference response, in any of the three shapes it has actually
+    served, normalised to one (label, signed score) per input.
+
+    This exists because the router silently changed shape and the old
+    parser -- which assumed exactly one of them -- discarded every batch
+    for it, leaving `sentimentAvailable: false` on every article for as
+    long as that went unnoticed. Confirmed live against the real endpoint:
+
+      A. one list of all labels PER input   [[pos,neg,neu], [pos,neg,neu]]
+      B. one list of per-input top results  [[pos, neg]]        <- current
+      C. a flat list of per-input tops      [pos, neg]
+
+    Order matters: with n == 1, A and B are indistinguishable, but both
+    reduce to the same answer (argmax of a single input's labels), so
+    checking A first is safe.
+    """
+    if not isinstance(raw, list):
+        return None
+
+    def best(entry: object) -> tuple[str, float] | None:
+        if isinstance(entry, list) and entry and all(isinstance(x, dict) for x in entry):
+            top = max(entry, key=lambda x: x.get("score", 0.0))
+            return _signed(str(top.get("label", "")), float(top.get("score", 0.0)))
+        if isinstance(entry, dict):
+            return _signed(str(entry.get("label", "")), float(entry.get("score", 0.0)))
+        return None
+
+    # A: one entry per input, each a list of that input's labels.
+    if len(raw) == n and all(isinstance(e, list) for e in raw):
+        parsed = [best(e) for e in raw]
+    # B: a single wrapper whose inner list holds one top result per input.
+    elif len(raw) == 1 and isinstance(raw[0], list) and len(raw[0]) == n:
+        parsed = [best(e) for e in raw[0]]
+    # C: already flat, one top result per input.
+    elif len(raw) == n and all(isinstance(e, dict) for e in raw):
+        parsed = [best(e) for e in raw]
+    else:
+        return None
+
+    if any(p is None for p in parsed):
+        return None
+    return parsed  # type: ignore[return-value]
+
+
 async def _hf_sentiment_batch(texts: list[str]) -> list[tuple[str, float]] | None:
     """
     Call HF Inference API in one batch request.
@@ -347,20 +404,12 @@ async def _hf_sentiment_batch(texts: list[str]) -> list[tuple[str, float]] | Non
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(url, json={"inputs": texts}, headers=headers)
             resp.raise_for_status()
-            raw = resp.json()
-            # raw is [[{label, score}, ...], ...] — one list per input text
-            results = []
-            for item in raw:
-                best = max(item, key=lambda x: x["score"])
-                label = best["label"].upper()
-                score = float(best["score"])
-                results.append((label, score if label == "POSITIVE" else (-score if label == "NEGATIVE" else 0.0)))
-            if len(results) != len(texts):
+            results = _parse_hf_sentiment(resp.json(), len(texts))
+            if results is None:
                 logger.warning(
-                    "HF sentiment returned %d scores for %d texts — discarding",
-                    len(results), len(texts),
+                    "HF sentiment response did not match any known shape for %d texts — discarding",
+                    len(texts),
                 )
-                return None
             return results
     except _API_ERRORS as e:
         logger.warning("HF sentiment batch failed: %s", e)

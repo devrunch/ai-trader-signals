@@ -92,6 +92,54 @@ class TestDedupeArticles:
         assert len(news._dedupe_articles(articles)) == 2
 
 
+class TestParseHfSentiment:
+    """Shapes B and C below are verbatim from the live endpoint -- the
+    router served B while the old parser only understood A, which is why
+    every article read `sentimentAvailable: false` until it was caught."""
+
+    def test_shape_a_one_list_of_all_labels_per_input(self):
+        raw = [
+            [{"label": "positive", "score": 0.8}, {"label": "negative", "score": 0.1}],
+            [{"label": "positive", "score": 0.2}, {"label": "negative", "score": 0.9}],
+        ]
+        assert news._parse_hf_sentiment(raw, 2) == [("POSITIVE", 0.8), ("NEGATIVE", -0.9)]
+
+    def test_shape_b_single_wrapper_with_one_top_result_per_input(self):
+        # Captured live: 3 inputs -> one inner list of 3 top results.
+        raw = [[
+            {"label": "positive", "score": 0.8221865892410278},
+            {"label": "negative", "score": 0.7716991305351257},
+            {"label": "neutral", "score": 0.611751914024353},
+        ]]
+        assert news._parse_hf_sentiment(raw, 3) == [
+            ("POSITIVE", 0.8221865892410278),
+            ("NEGATIVE", -0.7716991305351257),
+            ("NEUTRAL", 0.0),
+        ]
+
+    def test_shape_c_already_flat(self):
+        raw = [{"label": "positive", "score": 0.7}, {"label": "neutral", "score": 0.6}]
+        assert news._parse_hf_sentiment(raw, 2) == [("POSITIVE", 0.7), ("NEUTRAL", 0.0)]
+
+    def test_a_single_input_is_read_the_same_under_a_or_b(self):
+        # With n == 1 the two shapes are indistinguishable; both must
+        # reduce to the argmax of that one input's labels.
+        assert news._parse_hf_sentiment([[{"label": "positive", "score": 0.82}]], 1) == [("POSITIVE", 0.82)]
+
+    def test_neutral_is_zero_regardless_of_confidence(self):
+        raw = [{"label": "neutral", "score": 0.99}]
+        assert news._parse_hf_sentiment(raw, 1) == [("NEUTRAL", 0.0)]
+
+    def test_a_length_mismatch_is_rejected_rather_than_misaligned(self):
+        # Two scores for three inputs cannot be attached to the right
+        # headlines, so the whole batch is discarded.
+        assert news._parse_hf_sentiment([{"label": "positive", "score": 0.5}] * 2, 3) is None
+
+    def test_an_unrecognisable_body_returns_none(self):
+        assert news._parse_hf_sentiment({"error": "model loading"}, 2) is None
+        assert news._parse_hf_sentiment(["nonsense"], 1) is None
+
+
 class TestFinanceDomains:
     def test_no_duplicates(self):
         # A hand-maintained grouped list makes it easy to add the same
