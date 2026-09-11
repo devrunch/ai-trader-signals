@@ -4,7 +4,7 @@ from celery.schedules import crontab
 from app.config import settings
 
 # SQS broker URL — kombu[sqs] handles the transport
-# IAM role auth (Fargate): sqs://
+# IAM role auth (instance role): sqs://
 # Explicit key auth (local dev): sqs://KEY:SECRET@
 if settings.aws_access_key_id:
     _broker = (
