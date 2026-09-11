@@ -1,15 +1,8 @@
-import asyncio
-import logging
-
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from app.market import calendar as market_calendar
 from app.market.live_ticks import LiveTicks
-from app.market.news import get_market_news_result
-from app.market.service import get_batch_quotes, get_historical, get_quote, get_tick_volume, get_ticks, search_symbols
-
-logger = logging.getLogger(__name__)
+from app.market.service import get_historical, get_quote, get_tick_volume, get_ticks, search_symbols
 
 router = APIRouter()
 
@@ -101,64 +94,3 @@ async def ticks(
     trading happened," only as "couldn't check."""
     result = await get_ticks(symbol.upper(), since, until)
     return {"symbol": symbol.upper(), "since": since, "until": until, "ticks": result}
-
-
-@router.post("/quotes/batch")
-async def batch_quotes(symbols: list[str], exchange: str = Query(default="NSE")):
-    """Batch quote fetch for screener — returns available quotes."""
-    return await get_batch_quotes(symbols, exchange.upper())
-
-
-@router.get("/news")
-async def news(
-    symbols: str | None = Query(default=None, description="Comma-separated NSE tickers"),
-    limit: int = Query(default=15, le=30),
-):
-    """Market news with FinBERT sentiment scoring. Requires NEWS_API_KEY in env."""
-    sym_list = [s.strip().upper() for s in symbols.split(",")] if symbols else None
-    return await get_market_news_result(sym_list, limit)
-
-
-@router.get("/status")
-async def market_status():
-    """NSE market open/closed + Nifty 50 + Sensex snapshot."""
-    # Session state comes from app/market/calendar.py — it used to be three
-    # inline time() comparisons here, which reported the market open on every
-    # trading holiday. The two index quotes are fetched together rather than
-    # one after the other; this is a page-load endpoint and each leg is a
-    # network round-trip.
-    state = market_calendar.session_state()
-    # return_exceptions: one index failing must not blank the other, nor the
-    # session state, which needs no network at all.
-    results: list = await asyncio.gather(
-        get_quote("^NSEI", "NSE"),
-        get_quote("^BSESN", "BSE"),
-        return_exceptions=True,
-    )
-    for res in results:
-        if isinstance(res, BaseException):
-            logger.warning("Market status index quote failed: %r", res)
-    nifty: dict = results[0] if isinstance(results[0], dict) else {}
-    sensex: dict = results[1] if isinstance(results[1], dict) else {}
-
-    return {
-        "nse_open": state["is_open"],
-        "is_trading_day": state["is_trading_day"],
-        "is_holiday": state["is_holiday"],
-        "is_square_off": state["is_square_off"],
-        "next_open": state["next_open"],
-        "holiday_calendar_known": state["holiday_calendar_known"],
-        "timestamp": state["timestamp"],
-        "nifty50": {
-            "ltp": nifty.get("ltp"),
-            "change_percent": nifty.get("change_percent"),
-        },
-        "sensex": {
-            "ltp": sensex.get("ltp"),
-            "change_percent": sensex.get("change_percent"),
-        },
-        # A null ltp above means the quote did not arrive, not that the index is
-        # at zero. Without this the frontend cannot tell a stale panel from a
-        # flat market.
-        "degraded": not (nifty and sensex),
-    }

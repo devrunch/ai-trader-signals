@@ -473,34 +473,6 @@ class TestGetMarketNewsResult:
             result = await news.get_market_news_result()
         assert result == {"articles": [], "count": 0, "degraded": True, "degraded_reason": "news_unavailable"}
 
-    @pytest.mark.asyncio
-    async def test_a_cached_result_is_returned_without_hitting_newsapi_again(self):
-        fake_redis = _FakeRedis()
-        articles = [_article("Cached headline")]
-        llm = FakeLlm(_response(json.dumps([{"affected": []}])))
-        fetch = AsyncMock(return_value=articles)
-        with patch("app.market.news._fetch_newsapi", new=fetch), \
-             patch("app.market.news._hf_sentiment_batch", new=AsyncMock(return_value=[("NEUTRAL", 0.0)])), \
-             patch("app.market.news.redis.from_url", return_value=fake_redis):
-            first = await news.get_market_news_result(llm=llm)
-            second = await news.get_market_news_result(llm=llm)
-
-        assert first == second
-        # The second call served the cached result -- NewsAPI was hit once, not twice.
-        assert fetch.await_count == 1
-
-    @pytest.mark.asyncio
-    async def test_a_total_fetch_failure_is_never_cached(self):
-        fake_redis = _FakeRedis()
-        fetch = AsyncMock(side_effect=RuntimeError("boom"))
-        with patch("app.market.news._fetch_newsapi", new=fetch), \
-             patch("app.market.news.redis.from_url", return_value=fake_redis):
-            await news.get_market_news_result()
-            await news.get_market_news_result()
-
-        # Retried on the very next call rather than replaying a cached failure.
-        assert fetch.await_count == 2
-
 
 class TestYfToArticle:
     def test_it_maps_onto_newsapi_shape(self):

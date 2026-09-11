@@ -70,14 +70,6 @@ ASSET_CLASSES = frozenset({"NSE", "BSE", "NASDAQ", "NYSE", "FOREX", "MCX", "CRYP
 # without also raising page_size, since the call still needs a real cap.
 IMPACT_MAX_TOKENS = 4096
 
-# A full get_market_news_result() call is a real NewsAPI fetch plus an HF
-# sentiment call plus several concurrent LLM impact-analysis calls -- a few
-# real seconds every time, unavoidable if it's actually run each time. Most
-# repeat page loads within a few minutes don't need a fresh analysis of
-# what is very likely the same headlines, so the full result (not just the
-# raw articles) is cached for a short, deliberately sub-"stale news" window.
-NEWS_CACHE_TTL_SECONDS = 5 * 60
-
 # How long one article's analyzed impact is remembered, keyed by its URL.
 # Comfortably longer than a story stays in a "latest headlines" pull, so a
 # multi-hour story is analyzed once across all the hourly pipeline ticks it
@@ -790,32 +782,11 @@ async def get_market_news_result(
     caller can tell "analyzed, found nothing" from "couldn't analyze",
     which used to look identical for both sentiment (NEUTRAL either way)
     and impact (empty list either way).
-
-    The full result is cached in Redis for NEWS_CACHE_TTL_SECONDS, keyed by
-    the real query text and page_size -- see that constant's own comment
-    for why. A total news-fetch failure is never cached (returned before
-    the cache write below), so a transient NewsAPI outage self-heals on
-    the very next request instead of being replayed for the rest of the
-    TTL window.
     """
     if symbols:
         query = " OR ".join(symbols[:5])
     else:
         query = DEFAULT_MARKET_QUERY
-
-    settings = get_settings()
-    cache_key = f"news:result:{query}:{page_size}"
-    r = redis.from_url(settings.redis_url)
-    try:
-        cached = await r.get(cache_key)
-        if cached:
-            return json.loads(cached)
-    except Exception as e:
-        # A cache read failing must degrade to "run it fresh," never to a
-        # 500 -- this is a speed-up, not a dependency.
-        logger.warning("News cache read failed: %s", e)
-    finally:
-        await r.aclose()
 
     # Four independent sources, fetched concurrently, each covering the
     # others' gaps: yfinance and Alpha Vantage (freshest, ~1h), NewsAPI
@@ -902,28 +873,7 @@ async def get_market_news_result(
         "degraded_reason": degraded_reason,
     }
 
-    # Cache the real result -- even a partially-degraded one (missing
-    # sentiment or impacts) is still real data worth serving fast for a
-    # repeat request in the same short window, not worth re-running every
-    # LLM call again on the mere chance a transient failure clears itself
-    # a few seconds later. A total fetch failure (news_unavailable) never
-    # reaches here -- those return early above, uncached, so the next
-    # request retries the fetch instead of replaying a cached empty page.
-    try:
-        r = redis.from_url(settings.redis_url)
-        try:
-            await r.set(cache_key, json.dumps(final), ex=NEWS_CACHE_TTL_SECONDS)
-        finally:
-            await r.aclose()
-    except Exception as e:
-        logger.warning("News cache write failed: %s", e)
-
     return final
-
-
-async def get_market_news(symbols: list[str] | None = None, page_size: int = 15) -> list[dict]:
-    """Articles only. Prefer `get_market_news_result` — it says what degraded."""
-    return (await get_market_news_result(symbols, page_size))["articles"]
 
 
 async def publish(result: dict) -> bool:

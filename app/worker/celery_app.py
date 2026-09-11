@@ -33,28 +33,6 @@ celery.conf.update(
     enable_utc=True,
     task_default_queue="ai-trader-tasks",
     beat_schedule={
-        # The screener fires only inside the real NSE window, 09:20–15:15 IST.
-        # A single `minute="*/15", hour="9-15"` entry also fired at 09:00 and
-        # 09:15 (before/at the open, on yesterday's bars) and at 15:45 (after
-        # the close), and every one of those runs stored signals that were
-        # scored in the published performance statistics. Three entries because
-        # crontab cannot express a half-open hour range in one expression.
-        # 09:20 rather than 09:15 so the session's first 15m bar has formed;
-        # 15:15 rather than 15:30 so there is time to act before square-off.
-        # `run_screener` re-checks `is_market_open()` itself — beat only narrows
-        # the window, the calendar (holidays included) is the actual gate.
-        "run-screener-open": {
-            "task": "app.worker.tasks.run_screener",
-            "schedule": crontab(minute="20,35,50", hour="9", day_of_week="mon-fri"),
-        },
-        "run-screener-day": {
-            "task": "app.worker.tasks.run_screener",
-            "schedule": crontab(minute="*/15", hour="10-14", day_of_week="mon-fri"),
-        },
-        "run-screener-close": {
-            "task": "app.worker.tasks.run_screener",
-            "schedule": crontab(minute="0,15", hour="15", day_of_week="mon-fri"),
-        },
         # Intraday means intraday: force-close every open paper position at
         # 15:20 IST, the point from which real brokers square off MIS positions.
         # Nothing is held overnight, so nothing carries overnight gap risk.

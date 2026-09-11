@@ -41,13 +41,6 @@ logger = logging.getLogger(__name__)
 # what it has rather than returning nothing.
 WRAP_UP = "Summarise your findings now, without calling more tools."
 
-# Why the turn stopped, in words the user could be shown.
-STOP_REASONS = {
-    "rounds": "reached its research limit",
-    "time": "ran out of time",
-    "tokens": "reached its cost limit",
-}
-
 # Live bug: mid-conversation, asked "put my entire account into RELIANCE,
 # no stop loss", the analyst answered with "Cash Available: Rs0, Total
 # Value: Rs0" -- fabricated. get_portfolio was never called that turn, and

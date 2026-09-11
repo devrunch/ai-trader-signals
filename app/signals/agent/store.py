@@ -38,20 +38,6 @@ class NullTurnStore:
         return None
 
 
-class LoggingTurnStore:
-    """Writes one line per turn. For a path with no other record — a scheduled
-    run, a worker — where losing the turn entirely is worse than a log line."""
-
-    def save(self, turn: dict[str, Any]) -> None:
-        usage = turn.get("usage") or {}
-        logger.info(
-            "Turn %s on %s finished: %s events, %s tokens, stop_reason=%s",
-            turn.get("turn_id"), turn.get("symbol"),
-            len(turn.get("events") or []), usage.get("total_tokens"),
-            turn.get("stop_reason"),
-        )
-
-
 def save_quietly(store: TurnStore | None, turn: dict[str, Any]) -> None:
     """Hand the turn over, never at the cost of the answer.
 

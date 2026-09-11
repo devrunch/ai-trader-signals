@@ -147,10 +147,6 @@ class MarketDataRouter:
         # an hour-old bar for something that might be a 5m chart.
         return self._intraday_cache
 
-    def _clear_key(self, cache: TTLCache, key: tuple) -> None:
-        cache.pop(key, None)
-        self._negative_cache.pop(key, None)
-
     # ------------------------------------------------------------------
     # Public API. Positional signatures are unchanged — app/signals/** calls
     # these — and `bypass_cache` is keyword-only with a safe default.
@@ -248,28 +244,6 @@ class MarketDataRouter:
         finally:
             if not lock.locked():
                 locks.pop(key, None)
-
-    def invalidate(self, symbol: str, exchange: str = "NSE") -> None:
-        """Drop every cached entry for one symbol.
-
-        For the case where something else already knows the cached value is
-        wrong (a corporate action, a manual refresh) and `bypass_cache` on a
-        single call is not enough.
-        """
-        sym, exch = symbol.upper(), exchange.upper()
-        self._clear_key(self._quote_cache, ("quote", sym, exch))
-        for cache in (self._intraday_cache, self._daily_cache):
-            for key in [k for k in list(cache.keys()) if k[1] == sym and k[2] == exch]:
-                self._clear_key(cache, key)
-
-    def cache_stats(self) -> dict:
-        """Sizes only — cheap enough to expose from a readiness/debug endpoint."""
-        return {
-            "quotes": len(self._quote_cache),
-            "intraday": len(self._intraday_cache),
-            "daily": len(self._daily_cache),
-            "negative": len(self._negative_cache),
-        }
 
 
 # Single shared instance — import this, don't instantiate your own.

@@ -252,13 +252,6 @@ async def generate_brief(publish: bool = True, max_candidates: int = 5):
     return doc
 
 
-@router.get("/global-cues")
-async def get_global_cues():
-    """Overnight global market cues and the computed market read."""
-    from app.market import global_cues
-    return await global_cues.collect()
-
-
 class BacktestBody(BaseModel):
     symbols: list[str] = Field(min_length=1, max_length=100)
     exchange: str = "NSE"
