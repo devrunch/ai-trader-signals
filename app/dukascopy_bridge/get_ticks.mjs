@@ -26,6 +26,12 @@ const data = await getHistoricRates({
   timeframe: "tick",
   format: "json",
   volumes: false,
+  // The library fetches one file per hour and, by default, pauses a full
+  // second between batches of 10 -- which made a 48-hour window cost ~5s,
+  // the largest single component of a forex chart load. These are static
+  // files on a CDN, so a wider batch and a short pause is not abuse.
+  batchSize: 20,
+  pauseBetweenBatchesMs: 100,
 });
 
 process.stdout.write(JSON.stringify(
