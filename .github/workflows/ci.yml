@@ -38,3 +38,36 @@ jobs:
 
       - run: ruff check app main.py tests
       - run: pytest -q
+
+  # Deploy only after this repo's own tests pass, and only for the real branch.
+  # deploy.sh on the box pulls all three repos, so whichever one moved, the
+  # whole stack ends up on the latest commit of each.
+  deploy:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # One deploy at a time per repo. Across repos, the box itself serialises
+    # them: the deploy key's forced command runs under flock.
+    concurrency:
+      group: deploy-production
+    steps:
+      - name: Deploy over SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          install -m 600 /dev/null key
+          printf '%s\n' "$DEPLOY_SSH_KEY" > key
+          # The key is restricted on the box to running deploy.sh, so the
+          # command sent here is ignored — any command triggers the deploy.
+          ssh -i key -o StrictHostKeyChecking=accept-new -o BatchMode=yes ubuntu@3.7.76.174 deploy
+          rm -f key
+
+      - name: Check the site answers
+        run: |
+          for i in $(seq 1 10); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' https://3.7.76.174.sslip.io/api/health || true)
+            [ "$code" = "200" ] && echo "health OK" && exit 0
+            echo "attempt $i: $code"; sleep 10
+          done
+          echo "site did not return 200 after the deploy"; exit 1
