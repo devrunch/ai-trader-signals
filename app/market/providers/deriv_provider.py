@@ -248,7 +248,11 @@ class DerivProvider:
             for candle in resp.get("candles") or []:
                 by_epoch[int(candle["epoch"])] = candle
             end -= window
-            if end <= oldest_wanted:
+            # Keep walking past the requested span while we have nothing at all:
+            # asking for a day of 1m bars on a Sunday covers only closed market,
+            # and answering "no data" there is useless when Friday's session is
+            # one window further back.
+            if end <= oldest_wanted and by_epoch:
                 break
 
         # Unfiltered: `span_days` decides how far back to walk, not what to keep.
@@ -257,22 +261,26 @@ class DerivProvider:
         return [by_epoch[epoch] for epoch in sorted(by_epoch)]
 
     async def _tick_volume(self, symbol: str, bucket_starts: list[int],
-                           granularity: int) -> list[float] | None:
+                           granularity: int) -> list[float | None] | None:
         """Tick-count volume, or None when it would cost more than it is worth
         (see _TICK_VOLUME_MAX_SPAN_SECONDS) or when the vendor call fails.
 
         Enrichment, never a precondition: losing volume must not cost the caller
         its bars, which is how a broken bridge subprocess used to 404 a chart."""
-        span_seconds = bucket_starts[-1] + granularity - bucket_starts[0]
-        if span_seconds > _TICK_VOLUME_MAX_SPAN_SECONDS:
+        # Measure the most recent stretch only, rather than all-or-nothing: a
+        # chart that paged back 40 days still gets volume on the part anyone is
+        # looking at, and older bars carry null -- not measured, not zero.
+        end = bucket_starts[-1] + granularity
+        first = bisect.bisect_left(bucket_starts, end - _TICK_VOLUME_MAX_SPAN_SECONDS)
+        recent = bucket_starts[first:]
+        if not recent:
             return None
         try:
-            return await _dukascopy_tick_volume(
-                symbol, bucket_starts[0], bucket_starts[-1] + granularity, bucket_starts,
-            )
+            counts = await _dukascopy_tick_volume(symbol, recent[0], end, recent)
         except Exception:
             logger.exception("Tick volume failed for %s -- bars are unaffected", symbol)
             return None
+        return [None] * first + list(counts)
 
     async def get_historical_df(
         self, symbol: str, exchange: str, interval: str, days: int

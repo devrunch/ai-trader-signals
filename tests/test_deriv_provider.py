@@ -349,7 +349,7 @@ class TestBackwardPaging:
 
 class TestTickVolumeIsOnlyEnrichment:
     @pytest.mark.asyncio
-    async def test_a_long_window_skips_the_tick_fetch_and_reports_no_volume(self):
+    async def test_only_the_recent_stretch_of_a_long_window_is_measured(self):
         # Bars a week apart: every tick between them is days of hourly Dukascopy
         # files fetched to fill two volume numbers.
         cm, _ = _mock_connect({"candles": [
@@ -357,11 +357,16 @@ class TestTickVolumeIsOnlyEnrichment:
             {"epoch": 1786752000 + 7 * 86400, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5},
         ]})
         with patch("app.market.providers.deriv_provider.websockets.connect", return_value=cm), \
-             patch("app.market.providers.deriv_provider._dukascopy_tick_volume") as fake:
+             patch("app.market.providers.deriv_provider._dukascopy_tick_volume",
+                   return_value=[9.0]) as fake:
             df = await DerivProvider().get_historical_df("XAUUSD", "FOREX", "1m", 7)
 
-        fake.assert_not_called()
-        assert df is not None and df["volume"].isna().all()
+        # Only the recent end is measured: the week-old bar is out of reach.
+        assert fake.call_count == 1
+        assert fake.call_args[0][3] == [1786752000 + 7 * 86400]
+        assert df is not None
+        assert pd.isna(df["volume"].iloc[0])
+        assert df["volume"].iloc[-1] == 9.0
 
     @pytest.mark.asyncio
     async def test_a_failing_bridge_costs_the_volume_not_the_bars(self):
