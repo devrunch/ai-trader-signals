@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_dispatch:   # a "Run workflow" button for deploying without a code change
   push:
     branches: [main]
   pull_request:

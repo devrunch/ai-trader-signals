@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.config import get_settings
 from app.market import news
 
 
@@ -263,6 +264,9 @@ class TestAnalyzeImpacts:
         result = await news._analyze_articles(llm, articles)
         assert result == [{"sentiment": None, "impacts": []}, {"sentiment": None, "impacts": []}]
         assert len(llm.calls) == 2
+        # The retry goes to the fallback model, not the same one again.
+        assert "model" not in llm.calls[0]
+        assert llm.calls[1]["model"] == get_settings().bedrock_fallback_model_id
 
     @pytest.mark.asyncio
     async def test_two_wrong_length_responses_in_a_row_gives_up_as_none(self):

@@ -179,7 +179,7 @@ YF_NEWS_TICKERS = [
 
 
 def _yf_to_article(item: dict) -> dict:
-    """Maps one yfinance news item onto NewsAPI's own article shape, so the
+    """Maps one Yahoo RSS news item onto NewsAPI's own article shape, so the
     two sources merge into one list nothing downstream has to special-case.
     `published_at` is already an ISO string on the current payload shape;
     the older flat shape's epoch seconds are converted here."""
@@ -548,23 +548,32 @@ async def _analyze_chunk(llm: LlmClient, chunk: list[dict]) -> list[dict] | None
     # One retry, not a loop: the model occasionally drifts off the exact
     # count (splits a multi-impact headline into two objects, or drops one)
     # -- worth one more real attempt before reporting this chunk unavailable,
-    # but this must stay bounded, not become a silent retry storm against a
-    # model that's reliably getting it wrong. The retry runs at a nonzero
-    # temperature deliberately: at temperature=0 a retry would just replay
-    # the exact same (wrong) output for the exact same prompt.
-    for attempt, temperature in enumerate((0, 0.3)):
+    # but this must stay bounded, not become a silent retry storm.
+    #
+    # The retry goes to a DIFFERENT model, at a nonzero temperature: asking
+    # the same model the same prompt at temperature 0 mostly reproduces the
+    # same malformed answer, and a failed chunk discards every article in it.
+    settings = get_settings()
+    attempts = (
+        {"temperature": 0},
+        {"temperature": 0.3, "model": settings.bedrock_fallback_model_id},
+    )
+    for attempt, options in enumerate(attempts):
         try:
             resp = await asyncio.to_thread(
-                llm.chat, temperature=temperature, max_tokens=IMPACT_MAX_TOKENS, messages=messages,
+                llm.chat, max_tokens=IMPACT_MAX_TOKENS, messages=messages, **options,
             )
         except Exception as e:
-            logger.warning("News impact analysis failed: %s", e)
+            logger.warning("News analysis failed: %s", e)
             return None
         parsed = _parse_analysis_response(resp.choices[0].message.content or "", n)
         if parsed is not None:
+            if attempt:
+                logger.info("News analysis recovered on %s", options["model"])
             return parsed
         if attempt == 0:
-            logger.info("News impact analysis retrying once after a malformed response")
+            logger.info("News analysis retrying on %s after a malformed response",
+                        settings.bedrock_fallback_model_id)
     return None
 
 

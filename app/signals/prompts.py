@@ -8,9 +8,10 @@ backtest and live paths demonstrably share the same text.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import pandas as pd
+if TYPE_CHECKING:  # pandas is a 65 MB import; this module only needs the type
+    import pandas as pd
 
 from app.config import get_settings
 

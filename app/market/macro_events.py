@@ -6,7 +6,7 @@ pure statistics). It has never known WHY -- brief.py's own narrative used to
 be limited to "NASDAQ moved +1.2%, your beta to NASDAQ is 0.25, implying
 +0.3%", with no notion of a CPI print, a Fed statement, or any other real
 event behind that move. This module is the "why": official US macro
-releases from FRED, general market headlines from yfinance, and Reddit-
+releases from FRED, general market headlines from Yahoo's RSS feeds, and Reddit-
 flavored chatter via Tavily (see reddit_chatter's own docstring for why
 Tavily and not Reddit's own API).
 
@@ -18,13 +18,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from xml.etree import ElementTree
 
 import httpx
 import redis.asyncio as redis
-import yfinance as yf
 
 from app.config import get_settings
-from app.signals.agent.tools.web import tavily_search
 
 logger = logging.getLogger(__name__)
 
@@ -128,54 +127,76 @@ async def fred_releases() -> list[dict] | None:
         await r.aclose()
 
 
-def _fetch_yf_news(ticker: str) -> list[dict]:
+# Yahoo's per-symbol RSS feed. The same headlines the yfinance package
+# returns, plus a real description -- and no pandas: importing yfinance for
+# this one HTTP call cost 65 MB of resident memory, measured.
+_YF_RSS = "https://feeds.finance.yahoo.com/rss/2.0/headline"
+# Yahoo returns an empty body to an unset/robot User-Agent.
+_YF_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; ai-trader/1.0)"}
+# One ticker's feed is a few KB; this only bounds a pathological response.
+_YF_MAX_BYTES = 2_000_000
+
+
+def _rss_text(item: ElementTree.Element, tag: str) -> str:
+    node = item.find(tag)
+    return (node.text or "").strip() if node is not None else ""
+
+
+async def _fetch_yf_news(ticker: str, client: httpx.AsyncClient) -> list[dict]:
+    """Real headlines for one symbol. Never raises -- one ticker's feed
+    failing must not take the others down with it."""
     try:
-        items = yf.Ticker(ticker).news or []
-    except _VENDOR_ERRORS as e:
-        logger.warning("yfinance news fetch failed for %s: %s", ticker, e)
+        resp = await client.get(
+            _YF_RSS, params={"s": ticker, "region": "US", "lang": "en-US"},
+            headers=_YF_HEADERS,
+        )
+        resp.raise_for_status()
+        if len(resp.content) > _YF_MAX_BYTES:
+            logger.warning("Yahoo RSS for %s was unexpectedly large -- skipping", ticker)
+            return []
+        root = ElementTree.fromstring(resp.content)
+    except (httpx.HTTPError, ElementTree.ParseError, OSError) as e:
+        logger.warning("Yahoo news fetch failed for %s: %s", ticker, e)
         return []
 
     out: list[dict] = []
-    for item in items[:8]:
-        # yfinance has changed this payload's shape before (a flat dict, then
-        # nested under "content") -- reading both rather than trusting
-        # whichever shape was true when this was written.
-        content = item.get("content") if isinstance(item.get("content"), dict) else item
-        title = content.get("title") or item.get("title")
+    for item in root.iter("item"):
+        title = _rss_text(item, "title")
         if not title:
             continue
-        publisher = ((content.get("provider") or {}).get("displayName")
-                     if isinstance(content.get("provider"), dict) else None) or item.get("publisher")
-        url = ((content.get("canonicalUrl") or {}).get("url")
-               if isinstance(content.get("canonicalUrl"), dict) else None) or item.get("link")
-        # `published_at`/`summary` are here for news.py's own market feed,
-        # which needs a real timestamp to sort by and a description to give
-        # the impact analysis something beyond the headline. The brief's own
-        # caller ignores both -- extra keys, no behaviour change for it.
-        # providerPublishTime is the older flat shape's epoch-seconds field.
-        published_at = content.get("pubDate") or content.get("displayTime") or item.get("providerPublishTime")
-        summary = content.get("summary") or content.get("description") or ""
         out.append({
-            "title": title, "publisher": publisher, "url": url,
-            "published_at": published_at, "summary": summary,
+            "title": title,
+            # The feed carries no publisher field of its own; the source name
+            # belongs to Yahoo's aggregation either way.
+            "publisher": "Yahoo Finance",
+            "url": _rss_text(item, "link"),
+            # RFC 822 ("Sat, 12 Sep 2026 13:48:26 +0000"), parsed by the caller
+            # in news.py the same way every other source's timestamp is.
+            "published_at": _rss_text(item, "pubDate"),
+            "summary": _rss_text(item, "description"),
         })
+        if len(out) >= 8:
+            break
     return out
 
 
 # Tickers whose news feed leans macro/USD/gold rather than single-stock --
-# yfinance attaches news to a symbol, there's no "general macro" feed to ask
+# Yahoo attaches news to a symbol, there's no "general macro" feed to ask
 # for directly. Gold futures, the US dollar index, the 10-year Treasury yield.
 _MACRO_NEWS_TICKERS = ["GC=F", "DX-Y.NYB", "^TNX"]
 
 
 async def yfinance_headlines(tickers: list[str] | None = None) -> list[dict]:
-    """Free, no key, real headlines -- no invented summary.
+    """Free, no key, real headlines from Yahoo's RSS feeds -- no invented summary.
 
     `tickers` defaults to the macro trio the brief wants; news.py passes a
     wider, asset-class-spanning set for the market feed. Yahoo attaches news
     to a symbol, so the ticker list IS the topic selection.
     """
-    lists = await asyncio.gather(*(asyncio.to_thread(_fetch_yf_news, t) for t in (tickers or _MACRO_NEWS_TICKERS)))
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        lists = await asyncio.gather(
+            *(_fetch_yf_news(t, client) for t in (tickers or _MACRO_NEWS_TICKERS))
+        )
     seen_urls: set[str] = set()
     out: list[dict] = []
     for lst in lists:
@@ -203,5 +224,9 @@ async def reddit_chatter(query: str, max_results: int = 5) -> dict:
     Returns `{"error": ...}` when Tavily isn't configured or the call
     fails -- callers must treat that as "couldn't check", not "no chatter".
     """
+    # Imported here, not at module scope: the tool package pulls the agent
+    # stack (and pandas) in with it, and the news pipeline imports this module.
+    from app.signals.agent.tools.web import tavily_search
+
     settings = get_settings()
     return await tavily_search(settings.tavily_api_key, f"site:reddit.com {query}", max_results)

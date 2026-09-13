@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from app.market import macro_events
@@ -113,46 +114,101 @@ class TestFredReleases:
         assert result == []
 
 
-class TestYfinanceHeadlines:
+def _rss(*items: tuple[str, str]) -> bytes:
+    """A minimal Yahoo-shaped RSS body: (title, url) per item."""
+    body = "".join(
+        f"<item><title>{t}</title><link>{u}</link>"
+        f"<description>Why it matters</description>"
+        f"<pubDate>Sat, 12 Sep 2026 13:48:26 +0000</pubDate></item>"
+        for t, u in items
+    )
+    return f"<rss version='2.0'><channel>{body}</channel></rss>".encode()
+
+
+class _FakeResponse:
+    def __init__(self, content: bytes):
+        self.content = content
+
+    def raise_for_status(self):
+        return None
+
+
+class _FakeClient:
+    """Stands in for httpx.AsyncClient: one canned RSS body per ticker."""
+
+    def __init__(self, by_ticker: dict, fail: set[str] | None = None):
+        self.by_ticker, self.fail = by_ticker, fail or set()
+        self.requested: list[str] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def get(self, url, params=None, headers=None):
+        ticker = (params or {}).get("s")
+        self.requested.append(ticker)
+        if ticker in self.fail:
+            raise httpx.ConnectError("rate limited")
+        return _FakeResponse(self.by_ticker.get(ticker, _rss()))
+
+
+class TestYahooHeadlines:
     @pytest.mark.asyncio
     async def test_real_headlines_are_deduplicated_by_url_across_tickers(self):
-        shared = {"title": "Fed signals rate path", "content": {"provider": {"displayName": "Reuters"}, "canonicalUrl": {"url": "https://example.com/a"}}}
-        unique = {"title": "Gold rallies", "content": {"provider": {"displayName": "Bloomberg"}, "canonicalUrl": {"url": "https://example.com/b"}}}
+        shared = ("Fed signals rate path", "https://example.com/a")
+        unique = ("Gold rallies", "https://example.com/b")
+        client = _FakeClient({
+            "GC=F": _rss(shared, unique),
+            "DX-Y.NYB": _rss(shared),
+            "^TNX": _rss(shared),
+        })
 
-        with patch("app.market.macro_events.yf.Ticker") as MockTicker:
-            def ticker_factory(sym):
-                m = MagicMock()
-                m.ticker = sym
-                m.news = [shared, unique] if sym == "GC=F" else [shared]
-                return m
-            MockTicker.side_effect = ticker_factory
+        with patch("app.market.macro_events.httpx.AsyncClient", return_value=client):
             result = await macro_events.yfinance_headlines()
 
         urls = [h["url"] for h in result]
-        assert urls.count("https://example.com/a") == 1  # deduplicated even though every ticker returned it
+        assert urls.count("https://example.com/a") == 1  # deduplicated across tickers
         assert "https://example.com/b" in urls
 
     @pytest.mark.asyncio
     async def test_a_vendor_error_for_one_ticker_does_not_drop_the_others(self):
-        def ticker_factory(sym):
-            m = MagicMock()
-            if sym == "GC=F":
-                type(m).news = property(lambda self: (_ for _ in ()).throw(OSError("rate limited")))
-            else:
-                m.news = [{"title": f"Headline for {sym}", "content": {}}]
-            return m
+        client = _FakeClient(
+            {t: _rss((f"Headline for {t}", f"https://example.com/{t}"))
+             for t in macro_events._MACRO_NEWS_TICKERS},
+            fail={"GC=F"},
+        )
 
-        with patch("app.market.macro_events.yf.Ticker", side_effect=ticker_factory):
+        with patch("app.market.macro_events.httpx.AsyncClient", return_value=client):
             result = await macro_events.yfinance_headlines()
 
         assert len(result) == len(macro_events._MACRO_NEWS_TICKERS) - 1
 
+    @pytest.mark.asyncio
+    async def test_the_description_is_carried_through_for_the_impact_analysis(self):
+        client = _FakeClient({"GC=F": _rss(("Gold rallies", "https://example.com/b"))})
+
+        with patch("app.market.macro_events.httpx.AsyncClient", return_value=client):
+            result = await macro_events.yfinance_headlines(["GC=F"])
+
+        assert result[0]["summary"] == "Why it matters"
+        assert result[0]["published_at"] == "Sat, 12 Sep 2026 13:48:26 +0000"
+
+    @pytest.mark.asyncio
+    async def test_an_unparseable_body_is_skipped_not_raised(self):
+        client = _FakeClient({"GC=F": b"<rss><channel><item>"})
+
+        with patch("app.market.macro_events.httpx.AsyncClient", return_value=client):
+            result = await macro_events.yfinance_headlines(["GC=F"])
+
+        assert result == []
 
 class TestRedditChatter:
     @pytest.mark.asyncio
     async def test_query_is_scoped_to_reddit_via_tavily(self):
         with patch("app.market.macro_events.get_settings", return_value=_settings()), \
-             patch("app.market.macro_events.tavily_search", new=AsyncMock(return_value={"results": [], "count": 0})) as fake:
+             patch("app.signals.agent.tools.web.tavily_search", new=AsyncMock(return_value={"results": [], "count": 0})) as fake:
             await macro_events.reddit_chatter("XAUUSD sentiment")
 
         fake.assert_called_once_with("test-tavily-key", "site:reddit.com XAUUSD sentiment", 5)

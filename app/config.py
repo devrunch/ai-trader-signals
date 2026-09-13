@@ -86,6 +86,11 @@ class Settings(BaseSettings):
     # setting a real key.
     bedrock_api_key: str = ""
     bedrock_model_id: str = "deepseek.v3.2"
+    # Second opinion for a batch the primary model answered in the wrong
+    # shape. A different model beats re-asking the same one, which mostly
+    # reproduces the same mistake. Measured close to DeepSeek on this task
+    # and cheaper -- see the bake-off in docs/how-it-works.
+    bedrock_fallback_model_id: str = "qwen.qwen3-235b-a22b-2507"
     bedrock_base_url: str = "https://bedrock-mantle.ap-south-1.api.aws/v1"
 
     # Market data
