@@ -147,3 +147,12 @@ async def test_an_equity_is_left_on_the_exchange_it_was_asked_for():
 
     assert len(df) == 3
     assert deriv.calls == []
+
+def test_the_resolved_exchange_is_what_gets_echoed_back():
+    # A layout saved as XAUUSD-on-NSE breaks the next time it is opened by a
+    # client that trusts the stored exchange.
+    router = _router_with(_FakeProvider(), _FakeProvider())
+    router.providers['FOREX'] = _FakeProvider()
+
+    assert router.resolve_exchange('XAUUSD', 'NSE') == 'FOREX'
+    assert router.resolve_exchange('RELIANCE', 'NSE') == 'NSE'

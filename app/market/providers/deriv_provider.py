@@ -183,7 +183,9 @@ class DerivProvider:
 
             return {
                 "symbol": symbol.upper(),
-                "exchange": exchange.upper(),
+                # FOREX, not whatever was asked for: this provider serves no other
+                # exchange, and the caller may have guessed (see resolve_exchange).
+                "exchange": "FOREX",
                 "ltp": round(ltp, 5),
                 "change": round(change, 5),
                 "change_percent": round(change_pct, 4),

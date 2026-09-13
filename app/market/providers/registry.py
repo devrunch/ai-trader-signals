@@ -106,6 +106,16 @@ class MarketDataRouter:
             weakref.WeakKeyDictionary()
         )
 
+    def resolve_exchange(self, symbol: str, exchange: str) -> str:
+        """The exchange a request will actually be served from.
+
+        Callers echo this back to the browser rather than what was asked for:
+        a chart layout saved as XAUUSD-on-NSE would fail the moment it was
+        reopened against a client that trusts the stored exchange."""
+        if deriv_symbol_for(symbol) and "FOREX" in self.providers:
+            return "FOREX"
+        return exchange.upper()
+
     def _provider_for(self, exchange: str, symbol: str | None = None) -> MarketDataProvider:
         """Exchange picks the provider, except where the symbol overrules it.
 

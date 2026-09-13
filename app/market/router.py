@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from app.market.live_ticks import LiveTicks
+from app.market.providers.registry import market_data_router
 from app.market.service import get_historical, get_quote, get_tick_volume, get_ticks, search_symbols
 
 router = APIRouter()
@@ -64,7 +65,11 @@ async def historical(
     bars = await get_historical(symbol.upper(), exchange.upper(), interval, days)
     if not bars:
         raise HTTPException(status_code=404, detail=f"No historical data for {symbol}")
-    return {"symbol": symbol.upper(), "exchange": exchange.upper(), "interval": interval, "bars": bars}
+    # The exchange it was served from, not the one that was asked for -- see
+    # MarketDataRouter.resolve_exchange.
+    return {"symbol": symbol.upper(),
+            "exchange": market_data_router.resolve_exchange(symbol.upper(), exchange.upper()),
+            "interval": interval, "bars": bars}
 
 
 @router.get("/tick-volume/{symbol}")
