@@ -13,6 +13,7 @@ from functools import partial
 import pandas as pd
 import yfinance as yf
 
+from app.market.contract import ProviderCapabilities, VolumeSource
 from app.market.intervals import clamp_days
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,17 @@ def _forex_ticker(pair: str) -> str:
 
 
 class YFinanceProvider:
+    # Empirically tuned against real requests -- Yahoo rejects a range that
+    # touches the documented boundary, so each of these carries a margin.
+    # These are the numbers the old global table held; they belong to this
+    # vendor alone.
+    capabilities = ProviderCapabilities(
+        intervals=frozenset({"1m", "5m", "15m", "30m", "1h", "1d"}),
+        max_bars_per_request=100_000,
+        max_days_by_interval={"1m": 6, "5m": 58, "15m": 58, "30m": 100, "1h": 720},
+        volume_source=VolumeSource.EXCHANGE,
+    )
+
     def _ticker_for(self, symbol: str, exchange: str) -> str:
         if exchange.upper() == "FOREX":
             return _forex_ticker(symbol)

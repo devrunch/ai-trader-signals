@@ -27,6 +27,7 @@ from kiteconnect import KiteConnect
 from kiteconnect.exceptions import KiteException
 
 from app.config import Settings
+from app.market.contract import ProviderCapabilities, VolumeSource
 from app.market.intervals import clamp_days
 
 logger = logging.getLogger(__name__)
@@ -139,6 +140,17 @@ def _score_match(symbol: str, name: str, q: str, q_compact: str, q_spaced: str) 
 
 
 class KiteProvider:
+    # Kite's own published historical limits, which are nothing like the
+    # yfinance ones a single global table used to impose on every provider:
+    # this vendor serves 400 days of hourly bars where that table clamped to
+    # 720 and let the request fail.
+    capabilities = ProviderCapabilities(
+        intervals=frozenset(_INTERVAL_MAP),
+        max_bars_per_request=100_000,        # bounded by the day window, not a row count
+        max_days_by_interval={"1m": 60, "5m": 100, "15m": 200, "30m": 200, "1h": 400, "1d": 2000},
+        volume_source=VolumeSource.EXCHANGE,
+    )
+
     def __init__(self, settings: Settings):
         self._settings = settings
         self._kite = KiteConnect(api_key=settings.zerodha_api_key)

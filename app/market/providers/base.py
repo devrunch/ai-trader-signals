@@ -9,9 +9,17 @@ from typing import Protocol
 
 import pandas as pd
 
+from app.market.contract import ProviderCapabilities
+
 
 class MarketDataProvider(Protocol):
     """A single data vendor for one or more exchanges/asset classes."""
+
+    # What this vendor can actually do. Declared, not inferred: the router
+    # pages and clamps from these numbers, so a limit known only inside one
+    # provider (or, worse, applied to all of them from a global table) is
+    # exactly the shape of bug this replaces.
+    capabilities: ProviderCapabilities
 
     async def get_quote(self, symbol: str, exchange: str) -> dict | None:
         """Current price snapshot: symbol, exchange, ltp, change, change_percent, ..."""

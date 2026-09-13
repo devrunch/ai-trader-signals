@@ -40,6 +40,7 @@ import pandas as pd
 import websockets
 from websockets.exceptions import WebSocketException
 
+from app.market.contract import ProviderCapabilities, VolumeSource
 from app.market.intervals import clamp_days
 from app.market.providers import dukascopy_bridge
 
@@ -161,6 +162,18 @@ async def tick_volume_since(app_symbol: str, since_epoch: int) -> int | None:
 
 
 class DerivProvider:
+    capabilities = ProviderCapabilities(
+        intervals=frozenset(_GRANULARITY_MAP),
+        max_bars_per_request=_MAX_COUNT,
+        # Bounded by the paging budget (_MAX_PAGES windows) rather than by a
+        # published retention -- Deriv documents none, and these are what the
+        # walk can actually reach.
+        max_days_by_interval={"1m": 7, "5m": 30, "15m": 90, "30m": 180, "1h": 365, "1d": 3650},
+        volume_source=VolumeSource.TICKS,
+        supports_ticks=False,           # tick counts come from Dukascopy, not here
+        anchors_window_on_end=True,
+    )
+
     def _pair_for(self, symbol: str) -> str | None:
         return deriv_symbol_for(symbol)
 
