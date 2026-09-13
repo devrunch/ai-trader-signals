@@ -78,7 +78,7 @@ async def check(llm: LlmClient | None = None) -> dict | None:
     ))
 
     snippets: list[str] = []
-    for (key, _query), result in zip(_QUERIES.items(), results):
+    for (key, _query), result in zip(_QUERIES.items(), results, strict=True):
         if result.get("error"):
             logger.info("Reddit sentiment search skipped for %s: %s", key, result["error"])
             continue

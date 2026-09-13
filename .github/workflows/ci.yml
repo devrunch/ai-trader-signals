@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push supersedes an in-flight run for the same branch.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      # The Pine sandbox is a real Node subprocess, and tests/test_pine_sandbox.py
+      # runs it, so CI needs its dependencies too.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: app/pine_sandbox/package-lock.json
+
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: npm ci --prefix app/pine_sandbox
+
+      - run: ruff check app main.py tests
+      - run: pytest -q

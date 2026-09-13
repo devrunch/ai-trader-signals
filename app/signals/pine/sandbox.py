@@ -150,7 +150,7 @@ async def _run_once(payload: str, timeout_s: float) -> dict[str, Any]:
             if not line:
                 raise RuntimeError("sandbox process closed its output")
             return json.loads(line.decode())
-        except (asyncio.TimeoutError, RuntimeError, ConnectionResetError, BrokenPipeError, ValueError) as e:
+        except (TimeoutError, RuntimeError, ConnectionResetError, BrokenPipeError, ValueError) as e:
             # Any anomaly here leaves the shared stdin/stdout stream in an
             # indeterminate state -- e.g. a half-written request, a
             # response line still to come from a request we gave up on, or
