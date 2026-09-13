@@ -3,35 +3,19 @@ from celery.schedules import crontab
 
 from app.config import settings
 
-# SQS broker URL — kombu[sqs] handles the transport
-# IAM role auth (instance role): sqs://
-# Explicit key auth (local dev): sqs://KEY:SECRET@
-if settings.aws_access_key_id:
-    _broker = (
-        f"sqs://{settings.aws_access_key_id}:{settings.aws_secret_access_key}@"
-    )
-else:
-    _broker = "sqs://"
-
 celery = Celery(
     "signals_worker",
-    broker=_broker,
+    broker=settings.redis_url,
     include=["app.worker.tasks"],
-    broker_transport_options={
-        "region": settings.aws_region,
-        "predefined_queues": {
-            "ai-trader-tasks": {"url": settings.sqs_tasks_queue_url},
-        },
-    },
 )
 
 celery.conf.update(
     task_serializer="json",
     result_serializer="json",
     result_backend=None,          # no result backend needed
+    broker_connection_retry_on_startup=True,
     timezone="Asia/Kolkata",
     enable_utc=True,
-    task_default_queue="ai-trader-tasks",
     beat_schedule={
         # Intraday means intraday: force-close every open paper position at
         # 15:20 IST, the point from which real brokers square off MIS positions.

@@ -3,14 +3,14 @@ Signal publishing.
 
 Behind a Protocol so the backtest runner and the morning brief can pass a
 `NullPublisher` instead of threading a `publish: bool` flag down through the
-generation path, and so a test never needs an SQS client.
+generation path, and so a test never needs a network call.
 """
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
 from typing import Protocol
+
+import httpx
 
 from app.config import get_settings
 from app.signals.types import GeneratedSignal
@@ -55,42 +55,20 @@ class NullPublisher:
         return None
 
 
-class SqsSignalPublisher:
-    """Publishes to SQS; the NestJS consumer persists and broadcasts.
+class HttpSignalPublisher:
+    """POSTs to the API's internal signals endpoint, which persists and broadcasts.
 
-    The boto3 client is built on first use, not in `__init__`, so constructing
-    this is free — `SignalService` used to build an SQS client unconditionally,
-    which meant `brief.py` paid for one on every run just to borrow the LLM.
+    Raises on failure; `SignalService.generate` logs it and still returns the signal.
     """
 
     def __init__(self, settings=None):
         self._settings = settings or get_settings()
-        self._client = None
-
-    def _sqs(self):
-        if self._client is None:
-            import boto3
-            kwargs = {"region_name": self._settings.aws_region}
-            if self._settings.aws_access_key_id:
-                kwargs["aws_access_key_id"] = self._settings.aws_access_key_id
-                kwargs["aws_secret_access_key"] = self._settings.aws_secret_access_key
-            self._client = boto3.session.Session(**kwargs).client("sqs")
-        return self._client
 
     async def publish(self, signal: GeneratedSignal) -> None:
-        queue_url: str | None = self._settings.sqs_signals_queue_url
-        if not queue_url:
-            logger.warning("SQS_SIGNALS_QUEUE_URL not set — signal not published")
-            return
-
-        payload = json.dumps(signal_payload(signal))
-        kwargs = {"QueueUrl": queue_url, "MessageBody": payload}
-        if ".fifo" in queue_url:
-            kwargs["MessageGroupId"] = "signals"
-            kwargs["MessageDeduplicationId"] = (
-                f"{signal.symbol}-{signal.signal_type.value}-{int(signal.entry_price)}"
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                f"{self._settings.api_service_url}/api/internal/signals",
+                headers={"x-internal-key": self._settings.internal_api_key},
+                json=signal_payload(signal),
             )
-
-        # boto3 is synchronous — offload so a slow SQS call does not block the
-        # event loop.
-        await asyncio.to_thread(lambda: self._sqs().send_message(**kwargs))
+            r.raise_for_status()

@@ -7,7 +7,7 @@ Two health endpoints, deliberately different:
                    it, so making it touch a dependency means a slow vendor
                    restarts a service that is working fine.
   * ``/ready``   — readiness. Probes the things this service needs to be
-                   *useful* (market data, SQS) and is what other services gate
+                   *useful* (market data) and is what other services gate
                    their startup on. Cached, so it cannot become a load source.
 """
 from __future__ import annotations
@@ -245,47 +245,6 @@ async def _probe_market() -> dict:
     return {"ok": True}
 
 
-def _probe_sqs_sync(queue_url: str, region: str) -> dict:
-    import boto3
-    from botocore.config import Config
-    from botocore.exceptions import BotoCoreError, ClientError
-
-    client = boto3.client(
-        "sqs",
-        region_name=region,
-        config=Config(
-            connect_timeout=2,
-            read_timeout=3,
-            retries={"max_attempts": 1},
-        ),
-    )
-    try:
-        client.get_queue_attributes(QueueUrl=queue_url, AttributeNames=["QueueArn"])
-        return {"ok": True}
-    except (BotoCoreError, ClientError) as e:
-        return {"ok": False, "detail": f"{type(e).__name__}"}
-
-
-async def _probe_sqs() -> dict:
-    settings = get_settings()
-    if not settings.sqs_signals_queue_url:
-        # Not configured is not unready — the compose dev stack runs without a
-        # queue. It is reported so it cannot be mistaken for a passing check.
-        return {"ok": True, "detail": "not configured"}
-    try:
-        return await asyncio.wait_for(
-            asyncio.to_thread(
-                _probe_sqs_sync, settings.sqs_signals_queue_url, settings.aws_region
-            ),
-            timeout=PROBE_TIMEOUT_SECONDS,
-        )
-    except TimeoutError:
-        return {"ok": False, "detail": "timeout"}
-    except Exception as e:
-        logger.exception("Readiness SQS probe raised")
-        return {"ok": False, "detail": f"{type(e).__name__}"}
-
-
 async def _readiness() -> dict:
     global _ready_cache, _ready_cached_at
 
@@ -299,8 +258,7 @@ async def _readiness() -> dict:
         if _ready_cache is not None and (now - _ready_cached_at) < READY_CACHE_SECONDS:
             return _ready_cache
 
-        market, sqs = await asyncio.gather(_probe_market(), _probe_sqs())
-        checks = {"market_data": market, "sqs": sqs}
+        checks = {"market_data": await _probe_market()}
         result = {
             "status": "ready" if all(c["ok"] for c in checks.values()) else "not ready",
             "service": "signals",

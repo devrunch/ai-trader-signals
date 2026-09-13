@@ -33,7 +33,7 @@ from app.market.providers.registry import market_data_router
 from app.signals import analysis, prompts, validation
 from app.signals import indicators as ind_mod
 from app.signals import sentiment as sentiment_mod
-from app.signals.publisher import SignalPublisher, SqsSignalPublisher
+from app.signals.publisher import HttpSignalPublisher, SignalPublisher
 from app.signals.types import GeneratedSignal, SignalType
 
 logger = logging.getLogger(__name__)
@@ -64,7 +64,7 @@ class SignalService:
                  market=market_data_router, settings=None):
         self.settings = settings or get_settings()
         self.llm = llm or get_llm()
-        self.publisher = publisher if publisher is not None else SqsSignalPublisher(self.settings)
+        self.publisher = publisher if publisher is not None else HttpSignalPublisher(self.settings)
         self.market = market
 
     # ------------------------------------------------------------------
@@ -105,7 +105,7 @@ class SignalService:
     async def generate(self, symbol: str, exchange: str = "NSE", publish: bool = True) -> SignalResult:
         """Generate a signal, or return the reason there isn't one.
 
-        `publish=False` keeps it out of the live SQS feed — used by the
+        `publish=False` keeps it out of the live signal feed — used by the
         pre-market brief, whose 06:30 signals are priced off the PREVIOUS
         session's close and would otherwise be scored as live intraday signals
         with the entire overnight gap folded into their P&L.

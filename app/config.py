@@ -76,9 +76,6 @@ class Settings(BaseSettings):
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""
 
-    # SQS
-    sqs_signals_queue_url: str = ""
-    sqs_tasks_queue_url: str = ""
 
     # Bedrock Mantle — OpenAI-compatible endpoint
     # Available: deepseek.v3.2 | mistral.mistral-large-3-675b-instruct | qwen.qwen3-235b-a22b-2507
