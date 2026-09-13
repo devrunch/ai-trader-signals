@@ -5,6 +5,7 @@ layer -- nothing here touches the real vendor.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -20,16 +21,40 @@ from app.market.providers.deriv_provider import (
 )
 
 
-def _mock_connect(response: dict):
-    """websockets.connect(...) used as `async with ... as ws`. Returns a
-    context manager whose ws.recv() yields one JSON response."""
-    ws = AsyncMock()
-    ws.send = AsyncMock()
-    ws.recv = AsyncMock(return_value=json.dumps(response))
-    cm = MagicMock()
-    cm.__aenter__ = AsyncMock(return_value=ws)
-    cm.__aexit__ = AsyncMock(return_value=False)
-    return cm, ws
+def _mock_connect(response: dict, pages: list[dict] | None = None):
+    """A stand-in for the shared Deriv connection.
+
+    The real one is a single socket whose answers are matched to their
+    requests by `req_id` and read by a background task, so this echoes that
+    id back the way Deriv does and yields messages as an async iterator.
+    `pages` hands out one response per request in order, then repeats the
+    last; `sent` records the payloads, for asserting what was asked for.
+    """
+    queue = list(pages) if pages else []
+    sent: list[dict] = []
+    outbox: asyncio.Queue = asyncio.Queue()
+
+    async def _send(raw):
+        payload = json.loads(raw)
+        sent.append(payload)
+        body = queue.pop(0) if queue else response
+        await outbox.put(json.dumps(dict(body, req_id=payload.get("req_id"))))
+
+    async def _messages():
+        while True:
+            yield await outbox.get()
+
+    ws = MagicMock()
+    ws.send = AsyncMock(side_effect=_send)
+    ws.close = AsyncMock()
+    ws.closed = False
+    ws.__aiter__ = lambda _self=None: _messages()
+    ws.sent = sent
+
+    async def _connect(*_args, **_kwargs):
+        return ws
+
+    return _connect, ws
 
 
 class TestDerivSymbolFor:
@@ -61,7 +86,7 @@ class TestGetQuote:
                 {"epoch": 1086400, "open": 2605.0, "high": 2650.5, "low": 2600.0, "close": 2650.5},
             ],
         })
-        with patch("app.market.providers.deriv_provider.websockets.connect", return_value=cm):
+        with patch("app.market.providers.deriv_socket.websockets.connect", cm):
             provider = DerivProvider()
             result = await provider.get_quote("XAUUSD", "FOREX")
 
@@ -89,7 +114,7 @@ class TestGetQuote:
         cm, ws = _mock_connect({
             "candles": [{"epoch": 1000, "open": 2600.0, "high": 2610.0, "low": 2595.0, "close": 2605.0}],
         })
-        with patch("app.market.providers.deriv_provider.websockets.connect", return_value=cm):
+        with patch("app.market.providers.deriv_socket.websockets.connect", cm):
             result = await DerivProvider().get_quote("XAUUSD", "FOREX")
 
         assert result["prev_close"] == 2600.0
@@ -97,12 +122,12 @@ class TestGetQuote:
     @pytest.mark.asyncio
     async def test_a_vendor_error_response_degrades_to_none_not_a_crash(self):
         cm, _ = _mock_connect({"error": {"code": "InvalidSymbol", "message": "bad symbol"}})
-        with patch("app.market.providers.deriv_provider.websockets.connect", return_value=cm):
+        with patch("app.market.providers.deriv_socket.websockets.connect", cm):
             assert await DerivProvider().get_quote("XAUUSD", "FOREX") is None
 
     @pytest.mark.asyncio
     async def test_a_network_error_degrades_to_none_not_a_crash(self):
-        with patch("app.market.providers.deriv_provider.websockets.connect", side_effect=OSError("no route")):
+        with patch("app.market.providers.deriv_socket.websockets.connect", side_effect=OSError("no route")):
             assert await DerivProvider().get_quote("XAUUSD", "FOREX") is None
 
 
@@ -119,7 +144,7 @@ class TestGetHistoricalDf:
                 {"epoch": 1786838400, "open": 2605.0, "high": 2620.0, "low": 2600.0, "close": 2615.0},
             ],
         })
-        with patch("app.market.providers.deriv_provider.websockets.connect", return_value=cm):
+        with patch("app.market.providers.deriv_socket.websockets.connect", cm):
             df = await DerivProvider().get_historical_df("XAUUSD", "FOREX", "1d", 10)
 
         assert isinstance(df, pd.DataFrame)
@@ -131,13 +156,13 @@ class TestGetHistoricalDf:
     @pytest.mark.asyncio
     async def test_an_empty_candles_list_returns_none(self):
         cm, _ = _mock_connect({"candles": []})
-        with patch("app.market.providers.deriv_provider.websockets.connect", return_value=cm):
+        with patch("app.market.providers.deriv_socket.websockets.connect", cm):
             assert await DerivProvider().get_historical_df("XAUUSD", "FOREX", "1d", 10) is None
 
     @pytest.mark.asyncio
     async def test_a_vendor_error_response_degrades_to_none_not_a_crash(self):
         cm, _ = _mock_connect({"error": {"code": "InvalidSymbol", "message": "bad symbol"}})
-        with patch("app.market.providers.deriv_provider.websockets.connect", return_value=cm):
+        with patch("app.market.providers.deriv_socket.websockets.connect", cm):
             assert await DerivProvider().get_historical_df("XAUUSD", "FOREX", "1d", 10) is None
 
 
@@ -202,7 +227,7 @@ class TestGetHistoricalDfVolumeWiring:
     @pytest.mark.asyncio
     async def test_the_tick_volume_lands_in_the_volume_column(self):
         cm, _ = _mock_connect({"candles": self.CANDLES})
-        with patch("app.market.providers.deriv_provider.websockets.connect", return_value=cm), \
+        with patch("app.market.providers.deriv_socket.websockets.connect", cm), \
              patch("app.market.providers.deriv_provider._dukascopy_tick_volume", return_value=[7.0, 12.0]) as fake:
             df = await DerivProvider().get_historical_df("XAUUSD", "FOREX", "1h", 1)
 
@@ -289,63 +314,70 @@ class TestBackwardPaging:
     further, and a closed market answers with nothing at all -- which used to
     read as "history ends here" and 404 every weekend 1m chart."""
 
-    @staticmethod
-    def _ws_returning(pages):
-        """A websocket whose recv() yields `pages` in order, then empties."""
-        sent: list[dict] = []
-
-        async def _send(payload):
-            sent.append(json.loads(payload))
-
-        queue = list(pages)
-
-        async def _recv():
-            return json.dumps(queue.pop(0) if queue else {"candles": []})
-
-        ws = AsyncMock()
-        ws.send = AsyncMock(side_effect=_send)
-        ws.recv = AsyncMock(side_effect=_recv)
-        cm = MagicMock()
-        cm.__aenter__ = AsyncMock(return_value=ws)
-        cm.__aexit__ = AsyncMock(return_value=False)
-        return cm, sent
-
     @pytest.mark.asyncio
-    async def test_an_empty_page_does_not_stop_the_walk(self):
-        # Page 1 empty (the weekend), page 2 holds the last session's bars.
-        cm, sent = self._ws_returning([
+    async def test_an_empty_window_does_not_stop_the_walk(self):
+        # The first windows are the weekend; the session is further back.
+        connect, ws = _mock_connect(
             {"candles": []},
-            {"candles": [{"epoch": 1786752000, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5}]},
-        ])
-        with patch("app.market.providers.deriv_provider.websockets.connect", return_value=cm), \
-             patch("app.market.providers.deriv_provider._dukascopy_tick_volume", return_value=[3.0]):
+            pages=[
+                {"candles": []},
+                {"candles": [{"epoch": 1786752000, "open": 1.0, "high": 2.0,
+                             "low": 0.5, "close": 1.5}]},
+            ],
+        )
+        with patch("app.market.providers.deriv_socket.websockets.connect", connect), \
+             patch("app.market.providers.deriv_provider._dukascopy_tick_volume",
+                   return_value=[3.0]):
             df = await DerivProvider().get_historical_df("XAUUSD", "FOREX", "1m", 5)
 
         assert df is not None and len(df) == 1
-        assert sent[0]["end"] != sent[1]["end"]
+        assert len({r["end"] for r in ws.sent}) > 1
 
     @pytest.mark.asyncio
-    async def test_each_page_asks_for_a_window_further_back(self):
-        cm, sent = self._ws_returning([])
-        with patch("app.market.providers.deriv_provider.websockets.connect", return_value=cm):
+    async def test_the_windows_cover_the_span_a_page_at_a_time(self):
+        connect, ws = _mock_connect({"candles": []})
+        with patch("app.market.providers.deriv_socket.websockets.connect", connect):
             await DerivProvider().get_historical_df("XAUUSD", "FOREX", "1m", 5)
 
-        ends = [int(r["end"]) for r in sent]
+        ends = sorted({int(r["end"]) for r in ws.sent}, reverse=True)
         assert len(ends) > 1, "a 5-day 1m span cannot fit in one 1000-candle window"
-        assert ends == sorted(ends, reverse=True)
-        assert ends[0] - ends[1] == _MAX_COUNT * 60
+        # Each window sits exactly one page further back than the last, so
+        # nothing between them is skipped.
+        steps = {ends[i] - ends[i + 1] for i in range(len(ends) - 1)}
+        assert steps == {_MAX_COUNT * 60}
 
     @pytest.mark.asyncio
     async def test_a_span_that_fits_in_one_window_is_one_request(self):
-        cm, sent = self._ws_returning([
-            {"candles": [{"epoch": 1786752000, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5}]},
-        ])
-        with patch("app.market.providers.deriv_provider.websockets.connect", return_value=cm), \
-             patch("app.market.providers.deriv_provider._dukascopy_tick_volume", return_value=[1.0]):
+        connect, ws = _mock_connect(
+            {"candles": [{"epoch": 1786752000, "open": 1.0, "high": 2.0,
+                          "low": 0.5, "close": 1.5}]},
+        )
+        with patch("app.market.providers.deriv_socket.websockets.connect", connect), \
+             patch("app.market.providers.deriv_provider._dukascopy_tick_volume",
+                   return_value=[1.0]):
             await DerivProvider().get_historical_df("XAUUSD", "FOREX", "1d", 30)
 
-        assert len(sent) == 1
+        assert len(ws.sent) == 1
 
+    @pytest.mark.asyncio
+    async def test_one_connection_serves_every_window(self):
+        # The reason this exists: a connection per window cost 1.48s of
+        # handshake each, and eight of them put a 1m chart past the API's
+        # upstream timeout.
+        connect, ws = _mock_connect({"candles": []})
+        opened = 0
+
+        async def counting_connect(*args, **kwargs):
+            nonlocal opened
+            opened += 1
+            return await connect(*args, **kwargs)
+
+        with patch("app.market.providers.deriv_socket.websockets.connect",
+                   counting_connect):
+            await DerivProvider().get_historical_df("XAUUSD", "FOREX", "1m", 5)
+
+        assert len(ws.sent) > 1
+        assert opened == 1
 
 class TestTickVolumeIsOnlyEnrichment:
     @pytest.mark.asyncio
@@ -356,7 +388,7 @@ class TestTickVolumeIsOnlyEnrichment:
             {"epoch": 1786752000, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5},
             {"epoch": 1786752000 + 7 * 86400, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5},
         ]})
-        with patch("app.market.providers.deriv_provider.websockets.connect", return_value=cm), \
+        with patch("app.market.providers.deriv_socket.websockets.connect", cm), \
              patch("app.market.providers.deriv_provider._dukascopy_tick_volume",
                    return_value=[9.0]) as fake:
             df = await DerivProvider().get_historical_df("XAUUSD", "FOREX", "1m", 7)
@@ -375,7 +407,7 @@ class TestTickVolumeIsOnlyEnrichment:
         cm, _ = _mock_connect({"candles": [
             {"epoch": 1786752000, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5},
         ]})
-        with patch("app.market.providers.deriv_provider.websockets.connect", return_value=cm), \
+        with patch("app.market.providers.deriv_socket.websockets.connect", cm), \
              patch("app.market.providers.deriv_provider._dukascopy_tick_volume",
                    side_effect=RuntimeError("the handler is closed")):
             df = await DerivProvider().get_historical_df("XAUUSD", "FOREX", "1h", 1)

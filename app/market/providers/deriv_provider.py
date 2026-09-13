@@ -30,20 +30,18 @@ keep the same honest 0.0 until it catches up.
 """
 from __future__ import annotations
 
-import asyncio
 import bisect
-import json
 import logging
 import time
 
 import pandas as pd
-import websockets
 from websockets.exceptions import WebSocketException
 
 from app.market.contract import ProviderCapabilities, VolumeSource
 from app.market.intervals import clamp_days
 from app.market.paging import walk_back
 from app.market.providers import dukascopy_bridge
+from app.market.providers.deriv_socket import socket_for
 
 logger = logging.getLogger(__name__)
 
@@ -105,13 +103,13 @@ def deriv_symbol_for(app_symbol: str) -> str | None:
 
 
 async def _request(payload: dict) -> dict:
-    """One request, one response, one short-lived connection -- see this
-    module's own docstring for why (no plain REST surface to call
-    instead)."""
-    async with websockets.connect(WS_URL, open_timeout=10) as ws:
-        await ws.send(json.dumps(payload))
-        raw = await asyncio.wait_for(ws.recv(), timeout=15)
-        return json.loads(raw)
+    """One request over the connection this loop already holds.
+
+    It used to open a connection per call, which cost 1.48s of handshake for
+    a 50ms answer -- eight of those in a row is what pushed a 1m forex chart
+    past the API's upstream timeout. See deriv_socket.py.
+    """
+    return await socket_for(WS_URL).request(payload)
 
 
 async def _dukascopy_tick_volume(app_symbol: str, start_epoch: int, end_epoch: int, bucket_starts: list[int]) -> list[float]:

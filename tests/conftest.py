@@ -65,3 +65,15 @@ def trending_frame() -> pd.DataFrame:
          "volume": rng.integers(5_000, 50_000, n).astype(float)},
         index=idx,
     )
+
+
+@pytest.fixture(autouse=True)
+def _fresh_deriv_socket():
+    """The Deriv connection is cached per event loop, and each test gets its
+    own loop and its own mocked transport -- a socket left over from the last
+    one would answer with the wrong fake."""
+    from app.market.providers import deriv_socket
+
+    deriv_socket._by_loop.clear()
+    yield
+    deriv_socket._by_loop.clear()

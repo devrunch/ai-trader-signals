@@ -4,6 +4,8 @@ Written once because the two rules it encodes are the ones that broke in
 production: step on wall-clock time rather than on what came back, and keep a
 failed page distinguishable from an empty one.
 """
+import asyncio
+
 import pandas as pd
 import pytest
 
@@ -63,7 +65,9 @@ async def test_an_empty_page_does_not_end_the_walk():
     walk = await walk_back(fetch, granularity_seconds=60, span_days=1,
                            page_bars=1000, now=NOW)
 
-    assert len(calls) == 3
+    # It reaches past the requested span rather than stopping at the first
+    # empty window, and the bars that exist further back come back.
+    assert len(calls) > 3
     assert len(walk.df) == 1
 
 
@@ -114,3 +118,40 @@ async def test_overlapping_pages_are_deduplicated_and_sorted():
     epochs = [int(e) for e in walk.df.index.astype("datetime64[s]").astype("int64")]
     assert epochs == sorted(epochs)
     assert len(epochs) == len(set(epochs))
+
+
+@pytest.mark.asyncio
+async def test_the_windows_are_fetched_concurrently():
+    # The property that took 1m gold charts down: eight windows fetched one
+    # after another cost 13.8s against the API's 10s timeout, where the same
+    # eight in parallel cost 2.3s. Windows are independent -- each carries its
+    # own `end` -- so nothing about them needs to be sequential.
+    in_flight = 0
+    peak = 0
+
+    async def fetch(end_epoch, count):
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0)          # yield, so overlap is observable
+        in_flight -= 1
+        return _page(end_epoch)
+
+    await walk_back(fetch, granularity_seconds=60, span_days=5,
+                    page_bars=1000, now=NOW)
+
+    assert peak > 1, "windows were fetched one at a time"
+
+
+@pytest.mark.asyncio
+async def test_one_window_raising_does_not_lose_the_others():
+    async def fetch(end_epoch, count):
+        if end_epoch == NOW:
+            raise TimeoutError("this window fell over")
+        return _page(end_epoch)
+
+    walk = await walk_back(fetch, granularity_seconds=60, span_days=5,
+                           page_bars=1000, now=NOW)
+
+    assert not walk.df.empty
+    assert walk.vendor_failed is True
