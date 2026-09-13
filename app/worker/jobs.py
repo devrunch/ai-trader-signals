@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 
@@ -19,28 +18,10 @@ from app.market import calendar as market_calendar
 from app.market.providers import kite_auth
 from app.signals.service import SignalService
 from app.worker import heartbeat
+from app.worker.runner import run_async
 
 logger = logging.getLogger(__name__)
 
-
-def run_async(coro):
-    """`asyncio.run` with a BOUNDED default executor.
-
-    Every blocking call in the data layer (yfinance, boto3) is offloaded with
-    `to_thread` / `run_in_executor(None, ...)`, which uses the loop's default
-    executor. A fresh `asyncio.run()` loop gets the interpreter default â€”
-    `min(32, cpu_count + 4)` threads, unbounded from the caller's point of
-    view. The API process bounds this in its lifespan hook in `main.py`, but a
-    Celery worker never runs `main.py`, so it has to be done here too or the
-    screener can spawn a thread per symbol against a 0.5 vCPU task.
-    """
-    async def main():
-        loop = asyncio.get_running_loop()
-        with ThreadPoolExecutor(max_workers=16, thread_name_prefix="worker-io") as pool:
-            loop.set_default_executor(pool)
-            return await coro
-
-    return asyncio.run(main())
 
 # Used only if the watchlist is empty or NestJS is briefly unreachable â€”
 # not the source of truth, that's the dynamic watchlist in MongoDB.
@@ -187,32 +168,6 @@ def square_off_positions():
     logger.info("Square-off complete â€” %d closed, %d failed: %s",
                 data.get("closed", 0), data.get("failed", 0), data.get("details"))
     return data
-
-
-@heartbeat.monitored("news-analysis")
-def run_news_analysis():
-    """News + sentiment + real per-headline stock impact -- hourly, all
-    day (NewsAPI's free tier caps at 100 requests/day, so hourly rather
-    than every 15 min). Moves the real NewsAPI/HF/LLM work out of the
-    request path:
-    the frontend now reads the stored latest result from ai-trader-api
-    instead of triggering this analysis live on every page load, the same
-    pipeline-then-read pattern the brief and the two alert tasks already
-    use."""
-    from app.market import news
-
-    async def run() -> tuple[dict, bool]:
-        result = await news.get_market_news_result(page_size=25)
-        return result, await news.publish(result)
-
-    try:
-        result, ok = run_async(run())
-        logger.info("News analysis done: %d articles, degraded=%s, published=%s",
-                    result["count"], result["degraded"], ok)
-        return {"count": result["count"], "degraded": result["degraded"], "published": ok}
-    except Exception:
-        logger.exception("News analysis failed")
-        return {"error": True}
 
 
 @heartbeat.monitored(heartbeat.market_overview_slug)

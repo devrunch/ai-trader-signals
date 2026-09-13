@@ -70,22 +70,27 @@ def build_scheduler(jobstore: RedisJobStore | None = None) -> AsyncIOScheduler:
     return scheduler
 
 
+def redis_jobstore(jobs_key: str, run_times_key: str) -> RedisJobStore:
+    """Persisted store, not in-memory: an in-memory store forgets that a job
+    was due while the process was down, so misfire_grace_time could never
+    apply. Each process passes its own keys -- newsd runs a second scheduler
+    against this same Redis, and a shared key would have each of them
+    executing the other's jobs."""
+    store = RedisJobStore.__new__(RedisJobStore)
+    RedisJobStore.__init__(store, jobs_key=jobs_key, run_times_key=run_times_key,
+                           **redis_kwargs(get_settings().redis_url))
+    return store
+
+
 def start() -> AsyncIOScheduler:
     """Build, wire to Redis and start. Returns the running scheduler."""
-    settings = get_settings()
-    # Persisted, not in-memory: an in-memory store forgets that a job was due
-    # while the process was down, so misfire_grace_time could never apply.
-    store = RedisJobStore.__new__(RedisJobStore)
-    RedisJobStore.__init__(store, jobs_key="apscheduler.jobs",
-                           run_times_key="apscheduler.run_times",
-                           **_redis_kwargs(settings.redis_url))
-    scheduler = build_scheduler(jobstore=store)
+    scheduler = build_scheduler(jobstore=redis_jobstore("apscheduler.jobs", "apscheduler.run_times"))
     scheduler.start()
     logger.info("Scheduler started with %d jobs: %s", len(SCHEDULE), ", ".join(SCHEDULE))
     return scheduler
 
 
-def _redis_kwargs(url: str) -> dict:
+def redis_kwargs(url: str) -> dict:
     """RedisJobStore takes connection kwargs, not a URL."""
     from urllib.parse import urlparse
 

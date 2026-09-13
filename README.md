@@ -10,9 +10,9 @@ Part of the [ai-trader](https://github.com/devrunch/ai-trader) monorepo — run 
 |---|---|
 | `app/market/` | Market data — `providers/` (Kite Connect for NSE/BSE, yfinance fallback), `router.py` and `service.py` (quotes/history/search/news), `kite_ticker.py` + `live_ticks.py` (real-time WebSocket ticks + the Redis pub/sub bridge to `ai-trader-api`), `calendar.py` (NSE trading calendar) |
 | `app/signals/` | The chat agent (`agent/` — orchestrator, tool suite, condition DSL), signal generation (`service.py`), backtesting (`backtest/`), the pre-market brief (`brief.py`) |
-| `app/worker/` | Celery tasks — screener runs, daily Zerodha session refresh, intraday square-off |
+| `app/worker/` | The scheduled jobs. `scheduler.py` runs six of them (drift check, reddit sentiment, the two market overviews, Zerodha session refresh, intraday square-off) inside the API process; `newsd.py` is a separate process for the hourly news pipeline alone, so its LLM work can be capped away from the terminal. `heartbeat.py` pings a Healthchecks check per job |
 | `app/llm/` | Bedrock (DeepSeek v3.2 / Mistral / Qwen3) client, OpenAI-compatible |
-| `main.py` | FastAPI app, lifespan (executor, Redis, Kite ticker), `/health` (liveness) vs `/ready` (readiness — probes market data + SQS, cached) |
+| `main.py` | FastAPI app, lifespan (executor, Redis, Kite ticker), `/health` (liveness) vs `/ready` (readiness — probes market data, cached) |
 
 ## Real-time price ticks
 
