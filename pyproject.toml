@@ -80,3 +80,6 @@ no_implicit_optional = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# So `pytest` works the same as `python -m pytest`, which implicitly puts the
+# project root on sys.path. Without it a bare `pytest` cannot import `app`.
+pythonpath = ["."]
