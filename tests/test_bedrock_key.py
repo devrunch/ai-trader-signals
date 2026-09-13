@@ -11,7 +11,7 @@ from app.config import generate_bedrock_key
 ACCESS_KEY = "AKIAIOSFODNN7EXAMPLE"
 SECRET_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 REGION = "ap-south-1"
-FIXED_NOW = datetime.datetime(2026, 9, 13, 9, 19, 15, tzinfo=datetime.timezone.utc)
+FIXED_NOW = datetime.datetime(2026, 9, 13, 9, 19, 15, tzinfo=datetime.UTC)
 
 
 def _decode(token: str) -> str:

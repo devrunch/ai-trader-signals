@@ -202,6 +202,9 @@ class Settings(BaseSettings):
     screener_concurrency: int = 5
     brief_concurrency: int = 4
 
+    # Healthchecks.io project API key; scheduled jobs ping their checks. Empty disables pinging.
+    healthchecks_api_key: str = ""
+
     # FinBERT via Hugging Face Inference API (free tier — no local torch needed)
     # Get a free token at https://huggingface.co/settings/tokens
     hf_api_token: str = ""
