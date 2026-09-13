@@ -124,18 +124,15 @@ async def _dukascopy_tick_volume(app_symbol: str, start_epoch: int, end_epoch: i
     no way to tell those apart and does not need to. `bucket_starts` must
     be sorted ascending -- the caller's `candles` list already is.
     """
-    ticks_ms = await dukascopy_bridge.fetch_tick_timestamps(
-        app_symbol.lower(), start_epoch * 1000, end_epoch * 1000,
+    counts = await dukascopy_bridge.fetch_tick_counts(
+        app_symbol.lower(), start_epoch * 1000, end_epoch * 1000, bucket_starts,
     )
-    if not ticks_ms:
+    # A length mismatch means the bridge and this side disagree about the
+    # candles; pandas would otherwise raise deep in the frame build, far from
+    # the cause. Volume is enrichment -- drop it, keep the bars.
+    if not counts or len(counts) != len(bucket_starts):
         return [0.0] * len(bucket_starts)
-
-    counts = [0] * len(bucket_starts)
-    for t_ms in ticks_ms:
-        idx = bisect.bisect_right(bucket_starts, t_ms // 1000) - 1
-        if 0 <= idx < len(counts):
-            counts[idx] += 1
-    return [float(c) for c in counts]
+    return counts
 
 
 async def tick_volume_since(app_symbol: str, since_epoch: int) -> int | None:

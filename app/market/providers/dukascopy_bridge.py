@@ -76,6 +76,23 @@ async def fetch_tick_timestamps(instrument: str, from_ms: int, to_ms: int, timeo
     return await _run_bridge({"instrument": instrument, "fromMs": from_ms, "toMs": to_ms}, instrument, timeout_s)
 
 
+async def fetch_tick_counts(instrument: str, from_ms: int, to_ms: int,
+                            bucket_starts_sec: list[int],
+                            timeout_s: float = 20.0) -> list[float] | None:
+    """Tick count per bucket, counted in the bridge rather than here.
+
+    Same data as fetch_tick_timestamps, minus the cost of carrying it: a
+    48-hour window is millions of timestamps, and serialising them through a
+    pipe for Python to bucket took longer than the vendor fetch itself.
+    None on any failure, as everywhere else here."""
+    counts = await _run_bridge(
+        {"instrument": instrument, "fromMs": from_ms, "toMs": to_ms,
+         "bucketStartsSec": bucket_starts_sec},
+        instrument, timeout_s,
+    )
+    return None if counts is None else [float(c) for c in counts]
+
+
 async def fetch_ticks(instrument: str, from_ms: int, to_ms: int, timeout_s: float = 15.0) -> list[dict] | None:
     """Real ticks with price for `instrument` in [from_ms, to_ms) -- each
     `{"t": epoch_ms, "p": mid_price}`, mid being Dukascopy's own bid/ask
