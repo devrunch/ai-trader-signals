@@ -152,7 +152,7 @@ class Settings(BaseSettings):
     chat_turn_budget_seconds: float = 55.0  # wall clock ceiling for one chat turn
     signal_max_tool_rounds: int = 4      # signal-generation tool-calling iterations
     chat_history_turns: int = 8          # how much conversation history to resend
-    sentiment_headline_limit: int = 10   # cost control on the FinBERT call
+    sentiment_headline_limit: int = 10   # cost control on the per-symbol sentiment call
     # Third budget for a chat turn, alongside rounds and wall clock. The tool
     # schemas alone are ~3,400 tokens and are resent every round, so a turn that
     # runs its full round cap costs ~20k tokens before a single candle. Without
@@ -202,10 +202,6 @@ class Settings(BaseSettings):
     # Healthchecks.io project API key; scheduled jobs ping their checks. Empty disables pinging.
     healthchecks_api_key: str = ""
 
-    # FinBERT via Hugging Face Inference API (free tier — no local torch needed)
-    # Get a free token at https://huggingface.co/settings/tokens
-    hf_api_token: str = ""
-    finbert_model: str = "ProsusAI/finbert"
 
     # pydantic-settings defaults to extra='forbid', so any key present in .env
     # but not declared here raises at import time. Docker hides this (compose

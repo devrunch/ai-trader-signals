@@ -92,54 +92,6 @@ class TestDedupeArticles:
         assert len(news._dedupe_articles(articles)) == 2
 
 
-class TestParseHfSentiment:
-    """Shapes B and C below are verbatim from the live endpoint -- the
-    router served B while the old parser only understood A, which is why
-    every article read `sentimentAvailable: false` until it was caught."""
-
-    def test_shape_a_one_list_of_all_labels_per_input(self):
-        raw = [
-            [{"label": "positive", "score": 0.8}, {"label": "negative", "score": 0.1}],
-            [{"label": "positive", "score": 0.2}, {"label": "negative", "score": 0.9}],
-        ]
-        assert news._parse_hf_sentiment(raw, 2) == [("POSITIVE", 0.8), ("NEGATIVE", -0.9)]
-
-    def test_shape_b_single_wrapper_with_one_top_result_per_input(self):
-        # Captured live: 3 inputs -> one inner list of 3 top results.
-        raw = [[
-            {"label": "positive", "score": 0.8221865892410278},
-            {"label": "negative", "score": 0.7716991305351257},
-            {"label": "neutral", "score": 0.611751914024353},
-        ]]
-        assert news._parse_hf_sentiment(raw, 3) == [
-            ("POSITIVE", 0.8221865892410278),
-            ("NEGATIVE", -0.7716991305351257),
-            ("NEUTRAL", 0.0),
-        ]
-
-    def test_shape_c_already_flat(self):
-        raw = [{"label": "positive", "score": 0.7}, {"label": "neutral", "score": 0.6}]
-        assert news._parse_hf_sentiment(raw, 2) == [("POSITIVE", 0.7), ("NEUTRAL", 0.0)]
-
-    def test_a_single_input_is_read_the_same_under_a_or_b(self):
-        # With n == 1 the two shapes are indistinguishable; both must
-        # reduce to the argmax of that one input's labels.
-        assert news._parse_hf_sentiment([[{"label": "positive", "score": 0.82}]], 1) == [("POSITIVE", 0.82)]
-
-    def test_neutral_is_zero_regardless_of_confidence(self):
-        raw = [{"label": "neutral", "score": 0.99}]
-        assert news._parse_hf_sentiment(raw, 1) == [("NEUTRAL", 0.0)]
-
-    def test_a_length_mismatch_is_rejected_rather_than_misaligned(self):
-        # Two scores for three inputs cannot be attached to the right
-        # headlines, so the whole batch is discarded.
-        assert news._parse_hf_sentiment([{"label": "positive", "score": 0.5}] * 2, 3) is None
-
-    def test_an_unrecognisable_body_returns_none(self):
-        assert news._parse_hf_sentiment({"error": "model loading"}, 2) is None
-        assert news._parse_hf_sentiment(["nonsense"], 1) is None
-
-
 class TestFinanceDomains:
     def test_no_duplicates(self):
         # A hand-maintained grouped list makes it easy to add the same
@@ -206,13 +158,13 @@ class TestFetchNewsapi:
 class TestParseImpactResponse:
     def test_a_clean_valid_response_parses_as_is(self):
         raw = json.dumps([
-            {"affected": [{"symbol": "reliance", "direction": "down", "assetClass": "NSE", "reason": "Crude spike squeezes refining margins."}]},
+            {"sentiment": "negative", "affected": [{"symbol": "reliance", "direction": "down", "assetClass": "NSE", "reason": "Crude spike squeezes refining margins."}]},
             {"affected": []},
         ])
-        result = news._parse_impact_response(raw, n=2)
+        result = news._parse_analysis_response(raw, n=2)
         assert result == [
-            [{"symbol": "RELIANCE", "direction": "down", "reason": "Crude spike squeezes refining margins.", "assetClass": "NSE"}],
-            [],
+            {"sentiment": "NEGATIVE", "impacts": [{"symbol": "RELIANCE", "direction": "down", "reason": "Crude spike squeezes refining margins.", "assetClass": "NSE"}]},
+            {"sentiment": None, "impacts": []},
         ]
 
     def test_a_missing_or_invalid_asset_class_defaults_to_other_not_dropped(self):
@@ -220,21 +172,21 @@ class TestParseImpactResponse:
             {"symbol": "TCS", "direction": "up", "reason": "No assetClass given."},
             {"symbol": "XAUUSD", "direction": "up", "assetClass": "MADE_UP", "reason": "Bogus class."},
         ]}])
-        result = news._parse_impact_response(raw, n=1)
-        assert result[0][0]["assetClass"] == "OTHER"
-        assert result[0][1]["assetClass"] == "OTHER"
+        result = news._parse_analysis_response(raw, n=1)
+        assert result[0]["impacts"][0]["assetClass"] == "OTHER"
+        assert result[0]["impacts"][1]["assetClass"] == "OTHER"
 
     def test_every_real_asset_class_passes_through(self):
         classes = ["NSE", "BSE", "NASDAQ", "NYSE", "FOREX", "MCX", "CRYPTO"]
         raw = json.dumps([{"affected": [
             {"symbol": "X", "direction": "up", "assetClass": c, "reason": "r"} for c in classes
         ]}])
-        result = news._parse_impact_response(raw, n=1)
-        assert [item["assetClass"] for item in result[0]] == classes
+        result = news._parse_analysis_response(raw, n=1)
+        assert [item["assetClass"] for item in result[0]["impacts"]] == classes
 
     def test_a_markdown_fenced_response_is_unwrapped_first(self):
         raw = "```json\n" + json.dumps([{"affected": []}]) + "\n```"
-        assert news._parse_impact_response(raw, n=1) == [[]]
+        assert news._parse_analysis_response(raw, n=1) == [{"sentiment": None, "impacts": []}]
 
     def test_malformed_individual_entries_are_dropped_not_guessed_at(self):
         raw = json.dumps([{
@@ -245,31 +197,31 @@ class TestParseImpactResponse:
                 "not even an object",
             ],
         }])
-        result = news._parse_impact_response(raw, n=1)
-        assert result == [[{"symbol": "TCS", "direction": "up", "reason": "Real one.", "assetClass": "OTHER"}]]
+        result = news._parse_analysis_response(raw, n=1)
+        assert result == [{"sentiment": None, "impacts": [{"symbol": "TCS", "direction": "up", "reason": "Real one.", "assetClass": "OTHER"}]}]
 
     def test_non_json_text_returns_none_not_an_empty_list(self):
-        assert news._parse_impact_response("I cannot help with that.", n=3) is None
+        assert news._parse_analysis_response("I cannot help with that.", n=3) is None
 
     def test_wrong_length_array_returns_none(self):
         # The model dropped or merged an entry -- can't trust the alignment
         # to the original headline order, so the whole batch is discarded
         # rather than silently misattributed.
         raw = json.dumps([{"affected": []}, {"affected": []}])
-        assert news._parse_impact_response(raw, n=3) is None
+        assert news._parse_analysis_response(raw, n=3) is None
 
     def test_a_reason_longer_than_200_chars_is_truncated_not_dropped(self):
         long_reason = "x" * 500
         raw = json.dumps([{"affected": [{"symbol": "TCS", "direction": "up", "reason": long_reason}]}])
-        result = news._parse_impact_response(raw, n=1)
-        assert len(result[0][0]["reason"]) == 200
+        result = news._parse_analysis_response(raw, n=1)
+        assert len(result[0]["impacts"][0]["reason"]) == 200
 
 
 class TestAnalyzeImpacts:
     @pytest.mark.asyncio
     async def test_no_articles_short_circuits_without_calling_the_llm(self):
         llm = FakeLlm()
-        result = await news._analyze_impacts(llm, [])
+        result = await news._analyze_articles(llm, [])
         assert result == []
         assert llm.calls == []
 
@@ -277,14 +229,14 @@ class TestAnalyzeImpacts:
     async def test_a_real_batched_call_covers_every_article_in_order(self):
         articles = [_article("CPI hotter than expected"), _article("Local bakery wins award")]
         llm = FakeLlm(_response(json.dumps([
-            {"affected": [{"symbol": "XAUUSD", "direction": "down", "assetClass": "FOREX", "reason": "Hot CPI strengthens USD, pressuring gold."}]},
-            {"affected": []},
+            {"sentiment": "negative", "affected": [{"symbol": "XAUUSD", "direction": "down", "assetClass": "FOREX", "reason": "Hot CPI strengthens USD, pressuring gold."}]},
+            {"sentiment": "neutral", "affected": []},
         ])))
-        result = await news._analyze_impacts(llm, articles)
+        result = await news._analyze_articles(llm, articles)
 
         assert result == [
-            [{"symbol": "XAUUSD", "direction": "down", "reason": "Hot CPI strengthens USD, pressuring gold.", "assetClass": "FOREX"}],
-            [],
+            {"sentiment": "NEGATIVE", "impacts": [{"symbol": "XAUUSD", "direction": "down", "reason": "Hot CPI strengthens USD, pressuring gold.", "assetClass": "FOREX"}]},
+            {"sentiment": "NEUTRAL", "impacts": []},
         ]
         # One call for the WHOLE batch, not one per article.
         assert len(llm.calls) == 1
@@ -297,7 +249,7 @@ class TestAnalyzeImpacts:
         class BrokenLlm:
             def chat(self, **kwargs):
                 raise RuntimeError("upstream down")
-        result = await news._analyze_impacts(BrokenLlm(), [_article()])
+        result = await news._analyze_articles(BrokenLlm(), [_article()])
         assert result is None
 
     @pytest.mark.asyncio
@@ -308,8 +260,8 @@ class TestAnalyzeImpacts:
             _response(json.dumps([{"affected": []}])),
             _response(json.dumps([{"affected": []}, {"affected": []}])),
         )
-        result = await news._analyze_impacts(llm, articles)
-        assert result == [[], []]
+        result = await news._analyze_articles(llm, articles)
+        assert result == [{"sentiment": None, "impacts": []}, {"sentiment": None, "impacts": []}]
         assert len(llm.calls) == 2
 
     @pytest.mark.asyncio
@@ -319,7 +271,7 @@ class TestAnalyzeImpacts:
             _response(json.dumps([{"affected": []}])),
             _response(json.dumps([{"affected": []}])),
         )
-        result = await news._analyze_impacts(llm, articles)
+        result = await news._analyze_articles(llm, articles)
         assert result is None
         assert len(llm.calls) == 2
 
@@ -374,10 +326,10 @@ class TestAnalyzeImpactsChunking:
                 {"affected": []},
             ]),
         })
-        result = await news._analyze_impacts(llm, articles)
+        result = await news._analyze_articles(llm, articles)
         assert len(result) == 10
-        assert result[8] == [{"symbol": "TCS", "direction": "up", "assetClass": "NSE", "reason": "r"}]
-        assert result[9] == []
+        assert result[8] == {"sentiment": None, "impacts": [{"symbol": "TCS", "direction": "up", "assetClass": "NSE", "reason": "r"}]}
+        assert result[9] == {"sentiment": None, "impacts": []}
         assert len(llm.calls) == 2
 
     @pytest.mark.asyncio
@@ -387,7 +339,7 @@ class TestAnalyzeImpactsChunking:
             "0. Headline 0": json.dumps([{"affected": []}] * 5),
             "0. Headline 5": "not json at all",  # both the attempt and its retry return this
         })
-        result = await news._analyze_impacts(llm, articles)
+        result = await news._analyze_articles(llm, articles)
         assert result is None
 
     @pytest.mark.asyncio
@@ -398,8 +350,8 @@ class TestAnalyzeImpactsChunking:
         # instead of the required one-object-per-headline response.
         articles = [_article(f"Headline {i}") for i in range(25)]
         llm = _EchoLlm()
-        result = await news._analyze_impacts(llm, articles)
-        assert result == [[] for _ in range(25)]
+        result = await news._analyze_articles(llm, articles)
+        assert result == [{"sentiment": None, "impacts": []} for _ in range(25)]
         assert len(llm.calls) == 4  # ceil(25/8)
         sizes = sorted(len(re.findall(r"(?m)^\d+\. ", c["messages"][1]["content"])) for c in llm.calls)
         assert sizes == [6, 6, 6, 7]
@@ -424,11 +376,10 @@ class TestGetMarketNewsResult:
     async def test_real_impacts_and_sentiment_both_land_on_the_right_article(self):
         articles = [_article("Rate cut expected"), _article("Nothing special")]
         llm = FakeLlm(_response(json.dumps([
-            {"affected": [{"symbol": "NIFTY", "direction": "up", "assetClass": "NSE", "reason": "Cheaper credit lifts equities."}]},
-            {"affected": []},
+            {"sentiment": "positive", "affected": [{"symbol": "NIFTY", "direction": "up", "assetClass": "NSE", "reason": "Cheaper credit lifts equities."}]},
+            {"sentiment": "neutral", "affected": []},
         ])))
         with patch("app.market.news._fetch_newsapi", new=AsyncMock(return_value=articles)), \
-             patch("app.market.news._hf_sentiment_batch", new=AsyncMock(return_value=[("POSITIVE", 0.9), ("NEUTRAL", 0.0)])), \
              patch("app.market.news.redis.from_url", return_value=_FakeRedis()):
             result = await news.get_market_news_result(llm=llm)
 
@@ -436,35 +387,37 @@ class TestGetMarketNewsResult:
         assert result["degraded_reason"] is None
         a0, a1 = result["articles"]
         assert a0["sentiment"] == "POSITIVE"
+        assert a0["sentimentAvailable"] is True
         assert a0["impacts"] == [{"symbol": "NIFTY", "direction": "up", "reason": "Cheaper credit lifts equities.", "assetClass": "NSE"}]
+        assert a1["sentiment"] == "NEUTRAL"
         assert a1["impacts"] == []
 
     @pytest.mark.asyncio
-    async def test_impact_analysis_failing_alone_is_reported_distinctly_from_sentiment_failing(self):
+    async def test_a_failed_analysis_leaves_both_sentiment_and_impacts_unavailable(self):
+        # Sentiment and impacts come from ONE call now, so they fail together --
+        # and neither may masquerade as a real answer.
         articles = [_article()]
         broken_llm = FakeLlm()  # never queued a response -- IndexError inside chat()
         with patch("app.market.news._fetch_newsapi", new=AsyncMock(return_value=articles)), \
-             patch("app.market.news._hf_sentiment_batch", new=AsyncMock(return_value=[("POSITIVE", 0.5)])), \
              patch("app.market.news.redis.from_url", return_value=_FakeRedis()):
             result = await news.get_market_news_result(llm=broken_llm)
 
         assert result["degraded"] is True
         assert result["degraded_reason"] == "impact_unavailable"
-        assert result["articles"][0]["impacts"] is None  # not [] -- "couldn't check", not "nothing found"
-        assert result["articles"][0]["sentimentAvailable"] is True
+        assert result["articles"][0]["impacts"] is None       # not [] -- "couldn't check"
+        assert result["articles"][0]["sentimentAvailable"] is False
+        assert result["articles"][0]["sentiment"] == "NEUTRAL"
 
     @pytest.mark.asyncio
-    async def test_both_pipelines_failing_is_reported_as_both(self):
+    async def test_an_unreadable_sentiment_label_is_unavailable_not_defaulted(self):
         articles = [_article()]
-        broken_llm = FakeLlm()
+        llm = FakeLlm(_response(json.dumps([{"sentiment": "vaguely upbeat", "affected": []}])))
         with patch("app.market.news._fetch_newsapi", new=AsyncMock(return_value=articles)), \
-             patch("app.market.news._hf_sentiment_batch", new=AsyncMock(return_value=None)), \
              patch("app.market.news.redis.from_url", return_value=_FakeRedis()):
-            result = await news.get_market_news_result(llm=broken_llm)
+            result = await news.get_market_news_result(llm=llm)
 
-        assert result["degraded_reason"] == "sentiment_and_impact_unavailable"
-        assert result["articles"][0]["impacts"] is None
         assert result["articles"][0]["sentimentAvailable"] is False
+        assert result["articles"][0]["impacts"] == []   # the impact half still stands
 
     @pytest.mark.asyncio
     async def test_a_news_fetch_failure_still_returns_a_well_shaped_empty_result(self):
@@ -681,11 +634,10 @@ class TestSourceIndependence:
     @pytest.mark.asyncio
     async def test_one_surviving_source_still_produces_a_feed(self):
         yf = [_article("Yahoo only")]
-        llm = FakeLlm(_response(json.dumps([{"affected": []}])))
+        llm = FakeLlm(_response(json.dumps([{"sentiment": "neutral", "affected": []}])))
         with patch("app.market.news._fetch_newsapi", new=AsyncMock(side_effect=RuntimeError("boom"))), \
              patch("app.market.news._fetch_yfinance", new=AsyncMock(return_value=yf)), \
              patch("app.market.news._fetch_newsdata_safe", new=AsyncMock(return_value=[])), \
-             patch("app.market.news._hf_sentiment_batch", new=AsyncMock(return_value=[("NEUTRAL", 0.0)])), \
              patch("app.market.news.redis.from_url", return_value=_FakeRedis()):
             result = await news.get_market_news_result(llm=llm)
 
@@ -696,11 +648,10 @@ class TestSourceIndependence:
     @pytest.mark.asyncio
     async def test_newsdata_alone_still_produces_a_feed(self):
         nd = [_article("Reuters via newsdata")]
-        llm = FakeLlm(_response(json.dumps([{"affected": []}])))
+        llm = FakeLlm(_response(json.dumps([{"sentiment": "neutral", "affected": []}])))
         with patch("app.market.news._fetch_newsapi", new=AsyncMock(side_effect=RuntimeError("boom"))), \
              patch("app.market.news._fetch_yfinance", new=AsyncMock(return_value=[])), \
              patch("app.market.news._fetch_newsdata_safe", new=AsyncMock(return_value=nd)), \
-             patch("app.market.news._hf_sentiment_batch", new=AsyncMock(return_value=[("NEUTRAL", 0.0)])), \
              patch("app.market.news.redis.from_url", return_value=_FakeRedis()):
             result = await news.get_market_news_result(llm=llm)
 
@@ -724,17 +675,17 @@ class TestImpactCacheAcrossRuns:
     async def test_an_already_analyzed_url_is_not_sent_to_the_llm_again(self):
         articles = [_article("Seen before"), _article("Brand new")]
         fake_redis = _FakeRedis()
-        fake_redis.store["news:impact:https://example.com/seen-before"] = json.dumps(
-            [{"symbol": "TCS", "direction": "up", "assetClass": "NSE", "reason": "cached"}]
+        fake_redis.store["news:analysis:https://example.com/seen-before"] = json.dumps(
+            {"sentiment": "POSITIVE", "impacts": [{"symbol": "TCS", "direction": "up", "assetClass": "NSE", "reason": "cached"}]}
         ).encode()
 
-        llm = FakeLlm(_response(json.dumps([{"affected": []}])))
+        llm = FakeLlm(_response(json.dumps([{"sentiment": "neutral", "affected": []}])))
         with patch("app.market.news.redis.from_url", return_value=fake_redis):
-            impacts, ok = await news._analyze_impacts_cached(llm, articles)
+            analyses, ok = await news._analyze_articles_cached(llm, articles)
 
         assert ok is True
-        assert impacts[0] == [{"symbol": "TCS", "direction": "up", "assetClass": "NSE", "reason": "cached"}]
-        assert impacts[1] == []
+        assert analyses[0] == {"sentiment": "POSITIVE", "impacts": [{"symbol": "TCS", "direction": "up", "assetClass": "NSE", "reason": "cached"}]}
+        assert analyses[1] == {"sentiment": "NEUTRAL", "impacts": []}
         # Only the uncached article reached the model.
         assert len(llm.calls) == 1
         assert "Brand new" in llm.calls[0]["messages"][1]["content"]
@@ -745,13 +696,13 @@ class TestImpactCacheAcrossRuns:
         articles = [_article("First run")]
         fake_redis = _FakeRedis()
         llm = FakeLlm(_response(json.dumps([
-            {"affected": [{"symbol": "INFY", "direction": "down", "assetClass": "NSE", "reason": "r"}]},
+            {"sentiment": "negative", "affected": [{"symbol": "INFY", "direction": "down", "assetClass": "NSE", "reason": "r"}]},
         ])))
         with patch("app.market.news.redis.from_url", return_value=fake_redis):
-            await news._analyze_impacts_cached(llm, articles)
+            await news._analyze_articles_cached(llm, articles)
 
-        stored = json.loads(fake_redis.store["news:impact:https://example.com/first-run"])
-        assert stored == [{"symbol": "INFY", "direction": "down", "assetClass": "NSE", "reason": "r"}]
+        stored = json.loads(fake_redis.store["news:analysis:https://example.com/first-run"])
+        assert stored == {"sentiment": "NEGATIVE", "impacts": [{"symbol": "INFY", "direction": "down", "assetClass": "NSE", "reason": "r"}]}
 
     @pytest.mark.asyncio
     async def test_a_failed_analysis_is_never_cached(self):
@@ -759,7 +710,7 @@ class TestImpactCacheAcrossRuns:
         fake_redis = _FakeRedis()
         broken = FakeLlm(_response("not json"))
         with patch("app.market.news.redis.from_url", return_value=fake_redis):
-            impacts, ok = await news._analyze_impacts_cached(broken, articles)
+            impacts, ok = await news._analyze_articles_cached(broken, articles)
 
         assert ok is False
         assert impacts == [None]
@@ -769,14 +720,14 @@ class TestImpactCacheAcrossRuns:
     @pytest.mark.asyncio
     async def test_a_dead_cache_degrades_to_analyzing_everything(self):
         articles = [_article("Anything")]
-        llm = FakeLlm(_response(json.dumps([{"affected": []}])))
+        llm = FakeLlm(_response(json.dumps([{"sentiment": "neutral", "affected": []}])))
 
         def _boom(*a, **k):
             raise RuntimeError("redis down")
 
         with patch("app.market.news.redis.from_url", new=_boom):
-            impacts, ok = await news._analyze_impacts_cached(llm, articles)
+            analyses, ok = await news._analyze_articles_cached(llm, articles)
 
         assert ok is True
-        assert impacts == [[]]
+        assert analyses == [{"sentiment": "NEUTRAL", "impacts": []}]
         assert len(llm.calls) == 1

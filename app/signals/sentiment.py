@@ -1,17 +1,16 @@
 """
 Per-symbol news sentiment for the signal engine.
 
-`SignalService` used to carry its own NewsAPI client and its own HF FinBERT
-client, duplicating `app/market/news.py` down to the copy-pasted comment about
-HF retiring the old inference endpoint — with the two copies disagreeing on
-page size and on how per-article scores were aggregated. This module keeps the
-aggregation the signal path needs and delegates all I/O to `market.news`.
+Headlines and scoring both come from `market.news`; this module only keeps the
+aggregation the signal path needs — the dominant label across recent headlines
+for one symbol.
 """
 from __future__ import annotations
 
 import logging
 
 from app.config import get_settings
+from app.llm.client import LlmClient, get_llm
 from app.market import news
 
 logger = logging.getLogger(__name__)
@@ -19,7 +18,7 @@ logger = logging.getLogger(__name__)
 NEUTRAL: dict = {"label": "neutral", "score": 0.5, "headlines_count": 0}
 
 
-async def symbol_sentiment(symbol: str) -> dict:
+async def symbol_sentiment(symbol: str, llm: LlmClient | None = None) -> dict:
     """Dominant sentiment label across recent headlines for one symbol.
 
     Returns `{label, score, headlines_count}`. Never raises — sentiment is an
@@ -37,23 +36,19 @@ async def symbol_sentiment(symbol: str) -> dict:
     if not headlines:
         return dict(NEUTRAL)
 
-    scored = await news._hf_sentiment_batch(headlines)
-    if not scored:
+    labels = await news.score_headlines(llm or get_llm(), headlines)
+    if not labels:
         return {**NEUTRAL, "headlines_count": len(headlines)}
 
-    # `_hf_sentiment_batch` returns signed scores (+ for POSITIVE, - for
-    # NEGATIVE, 0 for NEUTRAL). Aggregate per label and take the dominant one,
-    # which is the shape `generate_signal` and the prompt expect.
-    counts: dict[str, float] = {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
-    for label, score in scored:
-        counts[label.lower()] = counts.get(label.lower(), 0.0) + abs(score)
-
-    if not any(counts.values()):
-        return {**NEUTRAL, "headlines_count": len(headlines)}
+    counts: dict[str, int] = {"positive": 0, "negative": 0, "neutral": 0}
+    for label in labels:
+        counts[label.lower()] += 1
 
     dominant = max(counts, key=counts.__getitem__)
     return {
         "label": dominant,
-        "score": round(counts[dominant] / len(scored), 3),
+        # Share of headlines carrying the dominant label -- how one-sided the
+        # coverage is, which is what the signal prompt reads it as.
+        "score": round(counts[dominant] / len(labels), 3),
         "headlines_count": len(headlines),
     }

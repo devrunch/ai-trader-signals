@@ -1,5 +1,5 @@
 """
-News feed with FinBERT sentiment scoring (HF Inference API) and real
+News feed with per-headline sentiment and real
 per-headline stock-impact analysis (LLM, chunked into small concurrent
 batches -- see _analyze_impacts' own docstring) -- see _analyze_chunk's own
 docstring for why this replaced a naive keyword match against a fixed
@@ -28,7 +28,6 @@ _API_ERRORS = (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError)
 
 NEWSAPI_URL  = "https://newsapi.org/v2/everything"
 # HF retired api-inference.huggingface.co — inference now routes through router.huggingface.co
-HF_INFER_URL = "https://router.huggingface.co/hf-inference/models"
 
 
 # The India-only version of this query meant a real, forex-moving headline
@@ -333,7 +332,7 @@ def _alphavantage_to_article(item: dict) -> dict:
     """Maps one Alpha Vantage feed item onto NewsAPI's article shape.
 
     Its own `overall_sentiment_label`/`ticker_sentiment` are deliberately
-    NOT carried through: FinBERT scores every article in this feed, and
+    NOT carried through: one analysis scores every article in this feed, and
     mixing a second scorer's labels in for one source's articles only
     would make the sentiment column mean two different things depending
     on where the headline came from.
@@ -432,101 +431,12 @@ async def _fetch_newsdata_safe(page_size: int) -> list[dict]:
         return []
 
 
-def _signed(label: str, score: float) -> tuple[str, float]:
-    """FinBERT's own label, with the score signed by direction so callers can
-    sort or average it: positive stays positive, negative goes below zero,
-    and neutral is exactly 0 regardless of how confident the model was."""
-    upper = label.upper()
-    if upper == "POSITIVE":
-        return (upper, score)
-    if upper == "NEGATIVE":
-        return (upper, -score)
-    return (upper, 0.0)
+SENTIMENT_LABELS = ("POSITIVE", "NEGATIVE", "NEUTRAL")
 
 
-def _parse_hf_sentiment(raw: object, n: int) -> list[tuple[str, float]] | None:
-    """HF's inference response, in any of the three shapes it has actually
-    served, normalised to one (label, signed score) per input.
-
-    This exists because the router silently changed shape and the old
-    parser -- which assumed exactly one of them -- discarded every batch
-    for it, leaving `sentimentAvailable: false` on every article for as
-    long as that went unnoticed. Confirmed live against the real endpoint:
-
-      A. one list of all labels PER input   [[pos,neg,neu], [pos,neg,neu]]
-      B. one list of per-input top results  [[pos, neg]]        <- current
-      C. a flat list of per-input tops      [pos, neg]
-
-    Order matters: with n == 1, A and B are indistinguishable, but both
-    reduce to the same answer (argmax of a single input's labels), so
-    checking A first is safe.
-    """
-    if not isinstance(raw, list):
-        return None
-
-    def best(entry: object) -> tuple[str, float] | None:
-        if isinstance(entry, list) and entry and all(isinstance(x, dict) for x in entry):
-            top = max(entry, key=lambda x: x.get("score", 0.0))
-            return _signed(str(top.get("label", "")), float(top.get("score", 0.0)))
-        if isinstance(entry, dict):
-            return _signed(str(entry.get("label", "")), float(entry.get("score", 0.0)))
-        return None
-
-    # A: one entry per input, each a list of that input's labels.
-    if len(raw) == n and all(isinstance(e, list) for e in raw):
-        parsed = [best(e) for e in raw]
-    # B: a single wrapper whose inner list holds one top result per input.
-    elif len(raw) == 1 and isinstance(raw[0], list) and len(raw[0]) == n:
-        parsed = [best(e) for e in raw[0]]
-    # C: already flat, one top result per input.
-    elif len(raw) == n and all(isinstance(e, dict) for e in raw):
-        parsed = [best(e) for e in raw]
-    else:
-        return None
-
-    if any(p is None for p in parsed):
-        return None
-    return parsed  # type: ignore[return-value]
-
-
-async def _hf_sentiment_batch(texts: list[str]) -> list[tuple[str, float]] | None:
-    """
-    Call HF Inference API in one batch request.
-    Returns list of (label, score) where label is POSITIVE/NEGATIVE/NEUTRAL.
-
-    Returns **None** when scoring did not happen — an unset token, a network
-    failure, HF rate-limiting us. It used to return a full list of
-    ("NEUTRAL", 0.0), which is indistinguishable from genuinely neutral news:
-    a dead sentiment pipeline read to every caller as "the market feels fine".
-    Callers must decide what unavailable sentiment means for them.
-    """
-    if not texts:
-        return []
-    settings = get_settings()
-    url = f"{HF_INFER_URL}/{settings.finbert_model}"
-    headers = {"Authorization": f"Bearer {settings.hf_api_token}"} if settings.hf_api_token else {}
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(url, json={"inputs": texts}, headers=headers)
-            resp.raise_for_status()
-            results = _parse_hf_sentiment(resp.json(), len(texts))
-            if results is None:
-                logger.warning(
-                    "HF sentiment response did not match any known shape for %d texts — discarding",
-                    len(texts),
-                )
-            return results
-    except _API_ERRORS as e:
-        logger.warning("HF sentiment batch failed: %s", e)
-        return None
-    except Exception:
-        logger.exception("Unexpected error scoring sentiment for %d texts", len(texts))
-        return None
-
-
-def _parse_impact_response(raw_text: str, n: int) -> list[list[dict]] | None:
-    """Parses the LLM's JSON array into one clean impacts list per article,
-    in order. Any malformed entry (missing symbol, a direction other than
+def _parse_analysis_response(raw_text: str, n: int) -> list[dict] | None:
+    """Parses the LLM's JSON array into one `{sentiment, impacts}` entry per
+    article, in order. Any malformed entry (missing symbol, a direction other than
     up/down, wrong shape) is dropped rather than guessed at -- a partially-
     wrong impact list is worse than a shorter, honest one. Returns None
     (not a partial result) if the response isn't even the right SHAPE
@@ -538,14 +448,20 @@ def _parse_impact_response(raw_text: str, n: int) -> list[list[dict]] | None:
         return None
     if not isinstance(parsed, list) or len(parsed) != n:
         logger.warning(
-            "News impact analysis returned %s entries for %d articles — discarding",
+            "News analysis returned %s entries for %d articles — discarding",
             len(parsed) if isinstance(parsed, list) else type(parsed).__name__, n,
         )
         return None
 
-    results: list[list[dict]] = []
+    results: list[dict] = []
     for entry in parsed:
         affected = entry.get("affected") if isinstance(entry, dict) else None
+        # An unrecognised label means "we don't know", never a defaulted
+        # NEUTRAL -- that is the distinction sentimentAvailable exists for.
+        raw_sentiment = entry.get("sentiment") if isinstance(entry, dict) else None
+        sentiment = str(raw_sentiment).strip().upper() if raw_sentiment else None
+        if sentiment not in SENTIMENT_LABELS:
+            sentiment = None
         clean: list[dict] = []
         if isinstance(affected, list):
             for item in affected:
@@ -562,7 +478,7 @@ def _parse_impact_response(raw_text: str, n: int) -> list[list[dict]] | None:
                     "reason": str(item.get("reason") or "").strip()[:200],
                     "assetClass": asset_class if asset_class in ASSET_CLASSES else "OTHER",
                 })
-        results.append(clean)
+        results.append({"sentiment": sentiment, "impacts": clean})
     return results
 
 
@@ -578,7 +494,7 @@ def _parse_impact_response(raw_text: str, n: int) -> list[list[dict]] | None:
 IMPACT_CHUNK_SIZE = 8
 
 
-async def _analyze_chunk(llm: LlmClient, chunk: list[dict]) -> list[list[dict]] | None:
+async def _analyze_chunk(llm: LlmClient, chunk: list[dict]) -> list[dict] | None:
     """One LLM call (with one retry) for a single chunk of articles --
     see _analyze_impacts for how chunks are split and combined, and for
     the "why not keyword-matching" rationale this used to carry.
@@ -595,7 +511,13 @@ async def _analyze_chunk(llm: LlmClient, chunk: list[dict]) -> list[list[dict]] 
     )
     n = len(chunk)
     prompt = (
-        "For each numbered headline below, name the real, tradeable stocks or "
+        "For each numbered headline below, give two things.\n\n"
+        "\"sentiment\": the likely effect on the price of the main asset the "
+        "headline is about -- POSITIVE (up), NEGATIVE (down) or NEUTRAL (no clear "
+        "effect). Judge the price effect, not the tone of the words: an "
+        "inflation print that came in hotter than expected reads upbeat but is "
+        "NEGATIVE for equities.\n\n"
+        "\"affected\": name the real, tradeable stocks or "
         "instruments it plausibly affects (their real ticker or a clear, "
         "specific name -- not limited to any fixed list), the direction each "
         "would plausibly move (\"up\" or \"down\"), which market it trades on "
@@ -612,9 +534,9 @@ async def _analyze_chunk(llm: LlmClient, chunk: list[dict]) -> list[list[dict]] 
         f"{'s' if n != 1 else ''} -- one per "
         "headline above, in the same order, never fewer or more -- no other "
         "text:\n"
-        "[{\"affected\": [{\"symbol\": \"RELIANCE\", \"direction\": \"down\", "
+        "[{\"sentiment\": \"NEGATIVE\", \"affected\": [{\"symbol\": \"RELIANCE\", \"direction\": \"down\", "
         "\"assetClass\": \"NSE\", \"reason\": \"...\"}]}, "
-        "{\"affected\": [{\"symbol\": \"BZ=F\", \"direction\": \"up\", "
+        "{\"sentiment\": \"POSITIVE\", \"affected\": [{\"symbol\": \"BZ=F\", \"direction\": \"up\", "
         "\"assetClass\": \"MCX\", \"reason\": \"...\"}, {\"symbol\": \"USO\", "
         "\"direction\": \"up\", \"assetClass\": \"NYSE\", \"reason\": \"...\"}]}, "
         "...]"
@@ -638,7 +560,7 @@ async def _analyze_chunk(llm: LlmClient, chunk: list[dict]) -> list[list[dict]] 
         except Exception as e:
             logger.warning("News impact analysis failed: %s", e)
             return None
-        parsed = _parse_impact_response(resp.choices[0].message.content or "", n)
+        parsed = _parse_analysis_response(resp.choices[0].message.content or "", n)
         if parsed is not None:
             return parsed
         if attempt == 0:
@@ -646,7 +568,7 @@ async def _analyze_chunk(llm: LlmClient, chunk: list[dict]) -> list[list[dict]] 
     return None
 
 
-async def _analyze_impacts(llm: LlmClient, articles: list[dict]) -> list[list[dict]] | None:
+async def _analyze_articles(llm: LlmClient, articles: list[dict]) -> list[dict] | None:
     """Real per-headline stock/instrument impact -- not the keyword match
     this replaced (`_extract_symbols`, a plain substring check against a
     hardcoded 17-ticker shortlist: blind to anything outside that list, and
@@ -686,16 +608,16 @@ async def _analyze_impacts(llm: LlmClient, articles: list[dict]) -> list[list[di
     results = await asyncio.gather(*(_analyze_chunk(llm, c) for c in chunks))
     if any(r is None for r in results):
         return None
-    combined: list[list[dict]] = []
+    combined: list[dict] = []
     for r in results:
         combined.extend(r)
     return combined
 
 
-async def _analyze_impacts_cached(
+async def _analyze_articles_cached(
     llm: LlmClient, articles: list[dict],
-) -> tuple[list[list[dict] | None], bool]:
-    """`_analyze_impacts`, but each article's result is remembered by URL
+) -> tuple[list[dict | None], bool]:
+    """`_analyze_articles`, but each article's result is remembered by URL
     for IMPACT_CACHE_TTL_SECONDS.
 
     The pipeline re-fetches the same still-running story every hour, and
@@ -711,8 +633,10 @@ async def _analyze_impacts_cached(
     frozen in for two days.
     """
     settings = get_settings()
-    impacts: list[list[dict] | None] = [None] * len(articles)
-    keys = [f"news:impact:{a.get('url')}" if a.get("url") else None for a in articles]
+    analyses: list[dict | None] = [None] * len(articles)
+    # news:analysis:, not the old news:impact: -- the cached value now carries
+    # sentiment too, so old entries must not be read back as the new shape.
+    keys = [f"news:analysis:{a.get('url')}" if a.get("url") else None for a in articles]
 
     r = None
     try:
@@ -724,28 +648,28 @@ async def _analyze_impacts_cached(
             raw = by_key.get(key) if key else None
             if raw:
                 try:
-                    impacts[i] = json.loads(raw)
+                    analyses[i] = json.loads(raw)
                 except (json.JSONDecodeError, TypeError):
-                    impacts[i] = None
+                    analyses[i] = None
     except Exception as e:
         # A cache read failing must degrade to "analyze everything fresh",
         # never to a dead feed -- this is a cost saving, not a dependency.
         logger.warning("Impact cache read failed: %s", e)
 
-    pending = [i for i, v in enumerate(impacts) if v is None]
+    pending = [i for i, v in enumerate(analyses) if v is None]
     analysis_ok = True
     if pending:
-        fresh = await _analyze_impacts(llm, [articles[i] for i in pending])
+        fresh = await _analyze_articles(llm, [articles[i] for i in pending])
         if fresh is None:
             analysis_ok = False
         else:
             for i, value in zip(pending, fresh, strict=True):
-                impacts[i] = value
+                analyses[i] = value
             if r is not None:
                 try:
                     for i in pending:
                         if keys[i]:
-                            await r.set(keys[i], json.dumps(impacts[i]), ex=IMPACT_CACHE_TTL_SECONDS)
+                            await r.set(keys[i], json.dumps(analyses[i]), ex=IMPACT_CACHE_TTL_SECONDS)
                 except Exception as e:
                     logger.warning("Impact cache write failed: %s", e)
 
@@ -755,17 +679,57 @@ async def _analyze_impacts_cached(
         except Exception:
             logger.debug("Impact cache close failed", exc_info=True)
 
-    logger.info("Impact analysis: %d cached, %d freshly analyzed", len(articles) - len(pending), len(pending))
-    return impacts, analysis_ok
+    logger.info("News analysis: %d cached, %d freshly analyzed", len(articles) - len(pending), len(pending))
+    return analyses, analysis_ok
+
+
+async def score_headlines(llm: LlmClient, headlines: list[str]) -> list[str] | None:
+    """One label per headline: POSITIVE, NEGATIVE or NEUTRAL, in order.
+
+    The likely price effect on the asset the headline is about, not the tone
+    of its words. Returns None when the batch could not be scored at all --
+    callers must not read that as "the news is neutral".
+    """
+    if not headlines:
+        return []
+    n = len(headlines)
+    numbered = "\n".join(f"{i}. {h}" for i, h in enumerate(headlines))
+    prompt = (
+        "For each numbered headline, give the likely effect on the price of the "
+        "asset it is about: POSITIVE (up), NEGATIVE (down) or NEUTRAL (no clear "
+        "effect). Judge the price effect, not the tone of the words.\n\n"
+        f"{numbered}\n\n"
+        f"Respond with ONLY a JSON array of EXACTLY {n} labels, in the same "
+        'order, no other text: ["POSITIVE", "NEUTRAL", ...]'
+    )
+    try:
+        resp = await asyncio.to_thread(
+            llm.chat, temperature=0, max_tokens=400,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        parsed = json.loads(extract_json_text(resp.choices[0].message.content or ""))
+    except Exception as e:
+        logger.warning("Headline sentiment scoring failed: %s", e)
+        return None
+    if not isinstance(parsed, list) or len(parsed) != n:
+        logger.warning("Headline sentiment returned %s labels for %d headlines — discarding",
+                       len(parsed) if isinstance(parsed, list) else type(parsed).__name__, n)
+        return None
+    labels = [str(x).strip().upper() for x in parsed]
+    if any(label not in SENTIMENT_LABELS for label in labels):
+        logger.warning("Headline sentiment returned an unrecognised label — discarding")
+        return None
+    return labels
 
 
 async def get_market_news_result(
     symbols: list[str] | None = None, page_size: int = 15, llm: LlmClient | None = None,
 ) -> dict:
     """
-    Fetch market news, score sentiment, and analyze real per-headline stock
-    impact -- reporting what failed at each stage rather than silently
-    degrading to something that looks like a normal result.
+    Fetch market news and analyze each headline: its sentiment (the likely
+    price effect on the asset it is about) and the real stocks or instruments
+    it moves -- reporting what failed rather than silently degrading into
+    something that looks like a normal result.
 
     News comes from four independent sources merged newest-first
     (yfinance, Alpha Vantage, NewsAPI, newsdata.io); any one failing
@@ -775,13 +739,11 @@ async def get_market_news_result(
 
     symbols: optional list to narrow query (e.g. ["RELIANCE", "INFY"])
 
-    Returns `{articles, count, degraded, degraded_reason}`. Both the
-    sentiment and impact pipelines can fail independently of the news fetch
-    itself and of each other -- each article carries its own
-    `sentimentAvailable` (already existed) and `impacts: null` (new) so a
-    caller can tell "analyzed, found nothing" from "couldn't analyze",
-    which used to look identical for both sentiment (NEUTRAL either way)
-    and impact (empty list either way).
+    Returns `{articles, count, degraded, degraded_reason}`. The analysis can
+    fail independently of the news fetch, so each article carries its own
+    `sentimentAvailable` and `impacts: null` -- a caller can tell "analyzed,
+    found nothing" from "couldn't analyze", which would otherwise look
+    identical for sentiment (NEUTRAL either way) and impact (empty list).
     """
     if symbols:
         query = " OR ".join(symbols[:5])
@@ -809,22 +771,17 @@ async def get_market_news_result(
     if not articles:
         return {"articles": [], "count": 0, "degraded": True, "degraded_reason": "news_unavailable"}
 
-    texts = [f"{a.get('title') or ''}. {a.get('description') or ''}" for a in articles]
     llm = llm or get_llm()
-    sentiment_task = _hf_sentiment_batch(texts)
-    impacts_task = _analyze_impacts_cached(llm, articles)
-    scored, (impacts_list, impacts_ok) = await asyncio.gather(sentiment_task, impacts_task)
-
-    sentiment_ok = scored is not None
-    sentiments: list[tuple[str, float]] = scored if scored is not None else [("NEUTRAL", 0.0)] * len(texts)
+    analyses, analysis_ok = await _analyze_articles_cached(llm, articles)
 
     results = []
-    # strict=True: both fallback lists above are built to match `articles`'
-    # own length by construction (or `_hf_sentiment_batch`/_analyze_impacts
-    # already rejected a mismatched batch and returned None). If that ever
-    # stops being true, scores/impacts would be silently attached to the
-    # wrong headline.
-    for a, (label, score), impacts in zip(articles, sentiments, impacts_list, strict=True):
+    # strict=True: the analysis list is built to match `articles`' own length
+    # by construction (or _analyze_articles rejected a mismatched batch and
+    # returned None). If that ever stops being true, sentiment and impacts
+    # would be silently attached to the wrong headline.
+    for a, analysis in zip(articles, analyses, strict=True):
+        sentiment = (analysis or {}).get("sentiment")
+        impacts = (analysis or {}).get("impacts") if analysis else None
         headline    = a.get("title") or ""
         description = a.get("description") or ""
 
@@ -844,27 +801,20 @@ async def get_market_news_result(
             "source": (a.get("source") or {}).get("name", ""),
             "url": a.get("url", ""),
             "publishedAt": published_iso,
-            "sentiment": label,
-            "sentimentScore": round(score, 4),
-            # False means the NEUTRAL above is "we could not score it", not
-            # "FinBERT read it as neutral".
-            "sentimentAvailable": sentiment_ok,
-            # Real per-symbol impact from the LLM analysis above -- null
-            # (not []) means the batch couldn't be analyzed at all, same
-            # "unavailable, not empty" contract sentimentAvailable already
-            # gives sentiment.
+            # NEUTRAL with sentimentAvailable false means "we could not read
+            # it", not "the model read it as neutral".
+            "sentiment": sentiment or "NEUTRAL",
+            "sentimentAvailable": sentiment is not None,
+            # Real per-symbol impact from the same analysis -- null (not [])
+            # means this article could not be analyzed at all, the same
+            # "unavailable, not empty" contract sentimentAvailable gives.
             "impacts": impacts,
         })
 
-    degraded = not sentiment_ok or not impacts_ok
-    if not sentiment_ok and not impacts_ok:
-        degraded_reason = "sentiment_and_impact_unavailable"
-    elif not sentiment_ok:
-        degraded_reason = "sentiment_unavailable"
-    elif not impacts_ok:
-        degraded_reason = "impact_unavailable"
-    else:
-        degraded_reason = None
+    # One call now produces both sentiment and impacts, so they can no longer
+    # fail independently of each other.
+    degraded = not analysis_ok
+    degraded_reason = None if analysis_ok else "impact_unavailable"
 
     final = {
         "articles": results,

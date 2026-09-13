@@ -4,7 +4,7 @@ Walk-forward backtest runner.
 Runs the SAME production signal logic (regime filter, ATR-grounded prompt,
 validation gates) against frozen historical slices. Each slice only sees bars up
 to that point (no lookahead); the outcome is resolved against the REAL bars that
-actually followed. No FinBERT — point-in-time news isn't available historically
+actually followed. No news sentiment — point-in-time news isn't available historically
 — so this tests the technical logic, which is what's under test.
 
 A standing caveat, recorded here because it keeps being forgotten: at ~100

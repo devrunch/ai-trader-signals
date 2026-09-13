@@ -124,7 +124,7 @@ class SignalService:
             return SignalResult(None, "indicator_error")
 
         # Regime filter — skip choppy/range-bound conditions before paying for
-        # FinBERT + the LLM call. Weak ADX means no reliable trend to trade.
+        # the sentiment and signal LLM calls. Weak ADX means no reliable trend.
         # Fail CLOSED: a risk filter that disables itself when its input is
         # missing is worse than no filter, because it is invisible.
         adx = indicators.get("adx")
