@@ -115,3 +115,35 @@ async def test_search_respects_the_combined_limit():
     results = await router.search("x", limit=6)
 
     assert len(results) == 6
+
+@pytest.mark.asyncio
+async def test_a_forex_pair_is_routed_by_its_symbol_not_the_asked_exchange():
+    # Every layer defaults `exchange` to NSE, so a caller that simply does not
+    # know (a saved layout, a chat turn, a watchlist row) asks for gold on the
+    # Indian equity exchange and gets a 404. Deriv's pair table is the
+    # authority for these 29 symbols; NSE cannot serve them at all.
+    kite = _FakeProvider(quote={'symbol': 'XAUUSD', 'ltp': 0})
+    fallback = _FakeProvider(quote=None)
+    router = _router_with(kite, fallback)
+    deriv = _FakeProvider(quote={'symbol': 'XAUUSD', 'ltp': 4120.5})
+    router.providers['FOREX'] = deriv
+
+    result = await router.get_quote('XAUUSD', 'NSE', bypass_cache=True)
+
+    assert result['ltp'] == 4120.5
+    assert kite.calls == []
+
+
+@pytest.mark.asyncio
+async def test_an_equity_is_left_on_the_exchange_it_was_asked_for():
+    # The inference above must not start second-guessing real equities.
+    kite = _FakeProvider(df=pd.DataFrame({'close': [1, 2, 3]}))
+    fallback = _FakeProvider(df=None)
+    router = _router_with(kite, fallback)
+    deriv = _FakeProvider(df=pd.DataFrame({'close': [9]}))
+    router.providers['FOREX'] = deriv
+
+    df = await router.get_historical_df('RELIANCE', 'NSE', '15m', 5, bypass_cache=True)
+
+    assert len(df) == 3
+    assert deriv.calls == []

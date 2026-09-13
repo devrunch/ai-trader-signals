@@ -30,7 +30,7 @@ from cachetools import TTLCache
 
 from app.config import get_settings
 from app.market.providers.base import MarketDataProvider
-from app.market.providers.deriv_provider import DerivProvider
+from app.market.providers.deriv_provider import DerivProvider, deriv_symbol_for
 from app.market.providers.kite_provider import KiteProvider
 from app.market.providers.yfinance_provider import YFinanceProvider
 
@@ -106,7 +106,17 @@ class MarketDataRouter:
             weakref.WeakKeyDictionary()
         )
 
-    def _provider_for(self, exchange: str) -> MarketDataProvider:
+    def _provider_for(self, exchange: str, symbol: str | None = None) -> MarketDataProvider:
+        """Exchange picks the provider, except where the symbol overrules it.
+
+        `exchange` defaults to NSE in the frontend client, in the NestJS
+        controller and in the FastAPI route, so a caller that does not know the
+        exchange -- a saved chart layout, a chat turn, a watchlist row -- is
+        indistinguishable from one asking for Indian equity. XAUUSD on NSE is
+        not a thing that exists, and used to 404. Deriv's pair table is the
+        authority for those 29 symbols, so it wins over the claimed exchange."""
+        if symbol and deriv_symbol_for(symbol) and "FOREX" in self.providers:
+            return self.providers["FOREX"]
         return self.providers.get(exchange.upper(), self.fallback)
 
     async def search(self, query: str, limit: int = 8) -> list[dict]:
@@ -179,7 +189,7 @@ class MarketDataRouter:
                     if key in self._negative_cache:
                         return None
 
-                provider = self._provider_for(exchange)
+                provider = self._provider_for(exchange, symbol)
                 result = await provider.get_quote(symbol, exchange)
                 if result is None and provider is not self.fallback:
                     result = await self.fallback.get_quote(symbol, exchange)
@@ -231,7 +241,7 @@ class MarketDataRouter:
                     if key in self._negative_cache:
                         return None
 
-                provider = self._provider_for(exchange)
+                provider = self._provider_for(exchange, symbol)
                 df = await provider.get_historical_df(symbol, exchange, interval, days)
                 if (df is None or df.empty) and provider is not self.fallback:
                     df = await self.fallback.get_historical_df(symbol, exchange, interval, days)

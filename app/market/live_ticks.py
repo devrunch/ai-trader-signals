@@ -15,11 +15,22 @@ from typing import Any
 
 from app.market.deriv_ticker import DerivTickerClient
 from app.market.kite_ticker import KiteTickerClient
+from app.market.providers.deriv_provider import deriv_symbol_for
 
 logger = logging.getLogger(__name__)
 
 _KITE_EXCHANGES = {"NSE", "BSE", "MCX"}
 _DERIV_EXCHANGES = {"FOREX"}
+
+
+def _effective_exchange(symbol: str, exchange: str) -> str:
+    """Symbol beats the claimed exchange for Deriv pairs.
+
+    Same rule MarketDataRouter._provider_for applies: every layer defaults the
+    exchange to NSE, so a caller that does not know one asks for gold on the
+    Indian equity exchange -- which fails closed here rather than 404ing, and
+    is worse for it: the chart just never ticks."""
+    return "FOREX" if deriv_symbol_for(symbol) else exchange.upper()
 _CHANNEL = "market:ticks"
 
 
@@ -48,7 +59,8 @@ class LiveTicks:
         self._deriv = deriv_ticker
 
     async def subscribe(self, symbol: str, exchange: str) -> bool:
-        key = (symbol.upper(), exchange.upper())
+        exchange = _effective_exchange(symbol, exchange)
+        key = (symbol.upper(), exchange)
         if exchange.upper() in _KITE_EXCHANGES:
             if self._kite is None:
                 return False
@@ -68,7 +80,8 @@ class LiveTicks:
         return True
 
     async def unsubscribe(self, symbol: str, exchange: str) -> None:
-        key = (symbol.upper(), exchange.upper())
+        exchange = _effective_exchange(symbol, exchange)
+        key = (symbol.upper(), exchange)
         if exchange.upper() in _KITE_EXCHANGES:
             if self._kite is None:
                 return
