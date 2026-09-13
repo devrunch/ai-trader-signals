@@ -49,13 +49,15 @@ def generate_bedrock_key(access_key: str, secret_key: str, region: str, expires:
     auth = SigV4QueryAuth(frozen, "bedrock", region, expires=expires)
     req = AWSRequest(
         method="POST",
-        url="https://bedrock.amazonaws.com/?Action=CallWithBearerToken&Version=1",
+        url="https://bedrock.amazonaws.com/",
         headers={"host": "bedrock.amazonaws.com"},
+        params={"Action": "CallWithBearerToken"},
     )
     auth.add_auth(req)
 
-    # Bedrock Mantle expects the URL without the https:// scheme
-    url_body = req.url.replace("https://", "")
+    # Version is appended after signing: AWS verifies the signature without it.
+    # Bedrock Mantle expects the URL without the https:// scheme.
+    url_body = req.url.replace("https://", "") + "&Version=1"
     encoded = base64.b64encode(url_body.encode()).decode()
     return f"bedrock-api-key-{encoded}"
 
