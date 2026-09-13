@@ -45,7 +45,7 @@ jobs:
   # whole stack ends up on the latest commit of each.
   deploy:
     needs: test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     # One deploy at a time per repo. Across repos, the box itself serialises
