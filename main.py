@@ -34,6 +34,11 @@ from app.signals.pine import sandbox as pine_sandbox
 from app.signals.router import router as signals_router
 from app.worker import scheduler as job_scheduler
 
+# uvicorn configures its own loggers and nothing else, so this process was
+# dropping every app-level log line -- including the scheduler's, and any
+# job failure it reports. A root handler makes them visible in the container
+# log; uvicorn's own loggers do not propagate, so its lines are not doubled.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 # Every blocking vendor call (yfinance, boto3) is offloaded with
