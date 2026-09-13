@@ -42,6 +42,7 @@ from websockets.exceptions import WebSocketException
 
 from app.market.contract import ProviderCapabilities, VolumeSource
 from app.market.intervals import clamp_days
+from app.market.paging import walk_back
 from app.market.providers import dukascopy_bridge
 
 logger = logging.getLogger(__name__)
@@ -236,42 +237,27 @@ class DerivProvider:
     # ------------------------------------------------------------------
     # get_historical_df
     # ------------------------------------------------------------------
-    async def _fetch_candles(self, pair: str, granularity: int, span_days: int) -> list[dict]:
-        """Every candle the vendor will hand over for the requested span.
+    async def fetch_page(self, pair: str, granularity: int, end_epoch: int,
+                         count: int) -> pd.DataFrame | None:
+        """One vendor request: the candles in [end - count*granularity, end].
 
-        One request reaches back `_MAX_COUNT` candles from its own `end` and no
-        further (see that constant), so a longer span is walked backwards a
-        window at a time. The walk steps on wall-clock time rather than on what
-        came back: a closed market returns an empty page, and reading that as
-        "history ends here" is exactly what left weekend 1m charts blank."""
-        now = int(time.time())
-        oldest_wanted = now - span_days * 86400
-        window = _MAX_COUNT * granularity
-        end = now
-        by_epoch: dict[int, dict] = {}
-
-        for _ in range(_MAX_PAGES):
-            resp = await _request({
-                "ticks_history": pair, "style": "candles",
-                "granularity": granularity, "count": _MAX_COUNT, "end": str(end),
-            })
-            if "error" in resp:
-                logger.warning("Deriv time_series error for %s: %s", pair, resp["error"])
-                break
-            for candle in resp.get("candles") or []:
-                by_epoch[int(candle["epoch"])] = candle
-            end -= window
-            # Keep walking past the requested span while we have nothing at all:
-            # asking for a day of 1m bars on a Sunday covers only closed market,
-            # and answering "no data" there is useless when Friday's session is
-            # one window further back.
-            if end <= oldest_wanted and by_epoch:
-                break
-
-        # Unfiltered: `span_days` decides how far back to walk, not what to keep.
-        # A page that reaches past the requested window is free history the
-        # chart can pan into.
-        return [by_epoch[epoch] for epoch in sorted(by_epoch)]
+        None means the vendor failed; an empty frame means it answered with
+        nothing. That distinction is the whole point -- collapsing it is what
+        turned a closed market into a 404. Walking across pages belongs to
+        app/market/paging.py, not here."""
+        resp = await _request({
+            "ticks_history": pair, "style": "candles",
+            "granularity": granularity, "count": count, "end": str(end_epoch),
+        })
+        if "error" in resp:
+            logger.warning("Deriv time_series error for %s: %s", pair, resp["error"])
+            return None
+        candles = resp.get("candles") or []
+        if not candles:
+            return pd.DataFrame()
+        df = pd.DataFrame(candles)
+        df["date"] = pd.to_datetime(df["epoch"], unit="s")
+        return df.set_index("date").sort_index()
 
     async def _tick_volume(self, symbol: str, bucket_starts: list[int],
                            granularity: int) -> list[float | None] | None:
@@ -303,16 +289,22 @@ class DerivProvider:
             return None
         try:
             granularity = _GRANULARITY_MAP.get(interval, 86400)
-            candles = await self._fetch_candles(pair, granularity, clamp_days(interval, days))
-            if not candles:
+            walk = await walk_back(
+                lambda end, count: self.fetch_page(pair, granularity, end, count),
+                granularity_seconds=granularity,
+                span_days=clamp_days(interval, days),
+                page_bars=self.capabilities.max_bars_per_request,
+                max_pages=_MAX_PAGES,
+            )
+            if walk.df.empty:
                 return None
 
-            bucket_starts = [int(c["epoch"]) for c in candles]
+            df = walk.df
+            # astype("datetime64[s]") first: pandas keeps the resolution it was
+            # built with, so a bare astype("int64") is seconds here and
+            # nanoseconds elsewhere depending on how the frame was made.
+            bucket_starts = [int(e) for e in df.index.astype("datetime64[s]").astype("int64")]
             tick_volume = await self._tick_volume(symbol, bucket_starts, granularity)
-
-            df = pd.DataFrame(candles)
-            df["date"] = pd.to_datetime(df["epoch"], unit="s")
-            df = df.set_index("date").sort_index()
             for col in ("open", "high", "low", "close"):
                 df[col] = df[col].astype(float)
             df["volume"] = tick_volume

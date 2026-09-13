@@ -23,12 +23,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import weakref
+from datetime import UTC, datetime
 from typing import Any
 
 import pandas as pd
 from cachetools import TTLCache
 
 from app.config import get_settings
+from app.market import symbols as symbol_registry
+from app.market.bars import to_bars
+from app.market.contract import BarsResult, BarsStatus, VolumeSource
 from app.market.providers.base import MarketDataProvider
 from app.market.providers.deriv_provider import DerivProvider, deriv_symbol_for
 from app.market.providers.kite_provider import KiteProvider
@@ -85,6 +89,17 @@ class MarketDataRouter:
         # module docstring.
         self.providers["FOREX"] = DerivProvider()
 
+        # The same providers, addressed the way a resolved symbol names them.
+        # The exchange-keyed dict above stays for the legacy path; a resolved
+        # SymbolInfo says which vendor owns a symbol, which is not always
+        # answerable from an exchange string (every forex pair arrives
+        # labelled NSE by callers that do not know better).
+        self.by_provider: dict[str, MarketDataProvider] = {
+            symbol_registry.DERIV: self.providers["FOREX"],
+            symbol_registry.KITE: kite,
+            symbol_registry.YFINANCE: self.fallback,
+        }
+
         self._quote_cache: TTLCache = TTLCache(maxsize=_QUOTE_CACHE_SIZE, ttl=QUOTE_TTL_SECONDS)
         self._intraday_cache: TTLCache = TTLCache(maxsize=_HISTORY_CACHE_SIZE, ttl=INTRADAY_TTL_SECONDS)
         self._daily_cache: TTLCache = TTLCache(maxsize=_HISTORY_CACHE_SIZE, ttl=DAILY_TTL_SECONDS)
@@ -105,6 +120,62 @@ class MarketDataRouter:
         self._locks: weakref.WeakKeyDictionary[Any, dict[tuple, asyncio.Lock]] = (
             weakref.WeakKeyDictionary()
         )
+
+    async def get_bars(self, symbol: str, interval: str, days: int,
+                       exchange: str | None = None) -> BarsResult:
+        """Bars, plus why they are what they are.
+
+        The contract path (see docs/superpowers/specs/2026-09-13-market-data-
+        contract-design.md). `exchange` is a hint for a genuinely ambiguous
+        symbol and nothing more -- the resolver owns the venue, so a caller
+        that does not know one can no longer send a request nowhere."""
+        info = symbol_registry.resolve(symbol, exchange)
+        if info is None:
+            return BarsResult([], BarsStatus.UNKNOWN_SYMBOL,
+                              reason=f"No provider covers {symbol!r}")
+
+        provider = self.by_provider.get(info.provider, self.fallback)
+        caps = provider.capabilities
+        if interval not in caps.intervals:
+            return BarsResult(
+                [], BarsStatus.UNSUPPORTED_INTERVAL, info, caps.volume_source,
+                reason=f"{info.exchange} bars are not served at {interval}; try {sorted(caps.intervals)}",
+            )
+
+        # Clamped to what THIS vendor serves, not to a shared table of another
+        # vendor's limits -- and the caller is told, rather than quietly handed
+        # a shorter chart than it asked for.
+        allowed = caps.max_days(interval)
+        span = max(1, min(days, allowed))
+        truncated = span if span < days else None
+
+        df = await self.get_historical_df(symbol, info.exchange, interval, span)
+        if df is None or df.empty:
+            return self._empty_result(info, caps.volume_source, truncated)
+
+        return BarsResult(to_bars(df), BarsStatus.OK, info, caps.volume_source,
+                          truncated_to_days=truncated)
+
+    def _empty_result(self, info, volume_source: VolumeSource,
+                      truncated: int | None) -> BarsResult:
+        """Why nothing came back.
+
+        A closed market is knowable here and is the common case -- forex over a
+        weekend, an exchange overnight. With the session open, the providers
+        cannot yet tell an empty range from their own failure (both return
+        None today); until they are ported to the contract, that case is
+        reported as a vendor error, which is the direction that gets looked
+        at rather than silently ignored."""
+        now = datetime.now(UTC)
+        if not info.session.is_open(now):
+            opens = info.session.next_open(now)
+            when = f" until {opens:%Y-%m-%d %H:%M} UTC" if opens else ""
+            return BarsResult([], BarsStatus.CLOSED_MARKET, info, volume_source,
+                              reason=f"{info.exchange} is closed{when}",
+                              truncated_to_days=truncated)
+        return BarsResult([], BarsStatus.VENDOR_ERROR, info, volume_source,
+                          reason=f"No bars returned for {info.symbol} and the session is open",
+                          truncated_to_days=truncated)
 
     def resolve_exchange(self, symbol: str, exchange: str) -> str:
         """The exchange a request will actually be served from.

@@ -1,9 +1,10 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel
 
+from app.market.contract import BarsStatus
 from app.market.live_ticks import LiveTicks
 from app.market.providers.registry import market_data_router
-from app.market.service import get_historical, get_quote, get_tick_volume, get_ticks, search_symbols
+from app.market.service import get_quote, get_tick_volume, get_ticks, search_symbols
 
 router = APIRouter()
 
@@ -54,22 +55,53 @@ async def search(q: str = Query(min_length=1, max_length=40)):
     return {"results": await search_symbols(q)}
 
 
+# What each outcome means over HTTP. The code is for anything that only
+# speaks status codes -- monitoring, a cache, another service -- and the body
+# carries the same answer in a form the terminal can render. A closed market
+# is deliberately a 200: it is a normal state of the world, and reporting it
+# as a 404 is what buried the real failures in noise.
+_HTTP_STATUS = {
+    BarsStatus.OK: 200,
+    BarsStatus.NO_DATA: 200,
+    BarsStatus.CLOSED_MARKET: 200,
+    BarsStatus.UNSUPPORTED_INTERVAL: 400,
+    BarsStatus.UNKNOWN_SYMBOL: 404,
+    BarsStatus.VENDOR_ERROR: 503,
+    BarsStatus.OUT_OF_RETENTION: 200,
+}
+
+
 @router.get("/historical/{symbol}")
 async def historical(
+    response: Response,
     symbol: str,
-    exchange: str = Query(default="NSE"),
+    exchange: str | None = Query(default=None, description="Only disambiguates a dual listing; the symbol decides its venue"),
     interval: str = Query(default="15m", description="1m | 5m | 15m | 1h | 1d"),
     days: int = Query(default=30),
 ):
-    """OHLCV bars for charting. Works for equities (NSE/BSE) and Forex pairs."""
-    bars = await get_historical(symbol.upper(), exchange.upper(), interval, days)
-    if not bars:
-        raise HTTPException(status_code=404, detail=f"No historical data for {symbol}")
-    # The exchange it was served from, not the one that was asked for -- see
-    # MarketDataRouter.resolve_exchange.
-    return {"symbol": symbol.upper(),
-            "exchange": market_data_router.resolve_exchange(symbol.upper(), exchange.upper()),
-            "interval": interval, "bars": bars}
+    """OHLCV bars for charting, plus why they are what they are.
+
+    Never an unexplained empty chart: the body always carries a `status`,
+    and the HTTP code says whether anything is actually wrong. `exchange` is
+    optional now -- passing the wrong one (every caller that did not know sent
+    NSE) no longer sends the request nowhere."""
+    result = await market_data_router.get_bars(symbol.upper(), interval, days, exchange=exchange)
+    response.status_code = _HTTP_STATUS.get(result.status, 200)
+    if result.status is BarsStatus.VENDOR_ERROR:
+        # A vendor outage is worth retrying, unlike a bad request.
+        response.headers["Retry-After"] = "30"
+    return {
+        "symbol": symbol.upper(),
+        # The venue it was served from, never the one the caller guessed: a
+        # layout saved with the wrong exchange breaks when it is reopened.
+        "exchange": result.symbol.exchange if result.symbol else (exchange or "").upper(),
+        "interval": interval,
+        "bars": result.bars,
+        "status": result.status.value,
+        "reason": result.reason,
+        "volumeSource": result.volume_source.value,
+        "truncatedToDays": result.truncated_to_days,
+    }
 
 
 @router.get("/tick-volume/{symbol}")
