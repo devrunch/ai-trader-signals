@@ -32,6 +32,7 @@ from app.market.router import router as market_router
 from app.market.service import get_quote
 from app.signals.pine import sandbox as pine_sandbox
 from app.signals.router import router as signals_router
+from app.worker import scheduler as job_scheduler
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,21 @@ async def lifespan(app: FastAPI):
 
     settings = get_settings()
     redis_client = redis.from_url(settings.redis_url)
+
+    # The recurring jobs run here rather than in a separate Celery beat
+    # process: six cron entries a day did not need their own container, and
+    # the event watcher this makes room for has to wake seconds before a
+    # release, which beat's minute-resolution cron cannot express.
+    #
+    # A scheduler that cannot start must not take the charts down with it —
+    # this process also serves live ticks and the chat agent. The jobs then
+    # stop, which the Healthchecks pings surface within each job's grace
+    # period (see app/worker/heartbeat.py).
+    try:
+        scheduler = job_scheduler.start()
+    except Exception:
+        logger.exception("Scheduler failed to start — jobs will not run until this process restarts")
+        scheduler = None
 
     # Constructed unconditionally — the yfinance poll path (NASDAQ/NYSE/...)
     # needs no Kite token at all, so it must not be gated behind one.
@@ -200,6 +216,8 @@ async def lifespan(app: FastAPI):
                 pass
             except Exception as e:
                 logger.error("Background startup task failed during shutdown: %s", e)
+        if scheduler is not None:
+            scheduler.shutdown(wait=False)
         await live_ticks.close()
         if kite_ticker:
             kite_ticker.close()

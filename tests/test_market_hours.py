@@ -14,7 +14,7 @@ import pandas as pd
 import pytest
 
 from app.signals.backtest.runner import session_forward_window
-from app.worker import tasks as tasks_mod
+from app.worker import jobs as tasks_mod
 
 
 class _FrozenCalendar:

@@ -10,14 +10,14 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 from app.market.providers.kite_auth import KiteAuthError, KiteSession
-from app.worker.tasks import refresh_zerodha_session
+from app.worker.jobs import refresh_zerodha_session
 
 
 def test_a_successful_login_is_pushed_to_nestjs():
     session = KiteSession(access_token="tok_abc", nse_instruments=[], bse_instruments=[])
 
-    with patch("app.worker.tasks.kite_auth.refresh_session", return_value=session) as mock_refresh, \
-         patch("app.worker.tasks.httpx.put") as mock_put:
+    with patch("app.worker.jobs.kite_auth.refresh_session", return_value=session) as mock_refresh, \
+         patch("app.worker.jobs.httpx.put") as mock_put:
         mock_put.return_value = MagicMock(status_code=200)
         mock_put.return_value.raise_for_status = lambda: None
 
@@ -32,7 +32,7 @@ def test_a_successful_login_is_pushed_to_nestjs():
 def test_a_login_failure_is_logged_and_returned_not_raised():
     """The whole point: a failed refresh must not crash the beat worker or
     take down anything else it schedules."""
-    with patch("app.worker.tasks.kite_auth.refresh_session",
+    with patch("app.worker.jobs.kite_auth.refresh_session",
                side_effect=KiteAuthError("bad TOTP")):
         result = refresh_zerodha_session()
 
