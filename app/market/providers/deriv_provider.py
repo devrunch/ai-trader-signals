@@ -55,11 +55,23 @@ _VENDOR_ERRORS = (WebSocketException, OSError, TimeoutError,
 
 _GRANULARITY_MAP = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "1d": 86400}
 _BARS_PER_DAY = {"1m": 1440, "5m": 288, "15m": 96, "30m": 48, "1h": 24, "1d": 1}
-# `count` on a `style: "candles"` request -- not vendor-confirmed (Deriv's
-# docs list no documented cap), matches Twelve Data's own documented
-# 5000-point ceiling as a safe assumption; revisit if a real request ever
-# hits it.
-_MAX_COUNT = 5000
+# Vendor-confirmed by probing it live (2026-09-13): `count` is clamped to
+# 1000 server-side, `start` is ignored, and what you actually get back is the
+# candles that exist in [end - count*granularity, end]. So "the last N"
+# cannot be asked for: a 1m request anchored at now reaches back 1000 minutes
+# and no further, which over a weekend is entirely closed market and comes
+# back empty -- with no error. That was a 404 on every 1m forex chart.
+_MAX_COUNT = 1000
+
+# Enough backward pages for 5 days of 1m bars, the heaviest window the
+# terminal offers. Each page is one WebSocket round trip.
+_MAX_PAGES = 10
+
+# Tick volume costs by wall-clock range, not by candle count -- Dukascopy
+# publishes one tick file per hour, so a 5-day window is 120 file fetches
+# through a Node subprocess for millions of ticks. Past this the volume
+# column is null: "not measured", which is a different answer from zero.
+_TICK_VOLUME_MAX_SPAN_SECONDS = 48 * 3600
 
 # App-facing symbol (no slash, matches this app's SYMBOL_RE) -> (Deriv's own
 # symbol, display name). All 29 real instruments Deriv's public API lists
@@ -211,6 +223,57 @@ class DerivProvider:
     # ------------------------------------------------------------------
     # get_historical_df
     # ------------------------------------------------------------------
+    async def _fetch_candles(self, pair: str, granularity: int, span_days: int) -> list[dict]:
+        """Every candle the vendor will hand over for the requested span.
+
+        One request reaches back `_MAX_COUNT` candles from its own `end` and no
+        further (see that constant), so a longer span is walked backwards a
+        window at a time. The walk steps on wall-clock time rather than on what
+        came back: a closed market returns an empty page, and reading that as
+        "history ends here" is exactly what left weekend 1m charts blank."""
+        now = int(time.time())
+        oldest_wanted = now - span_days * 86400
+        window = _MAX_COUNT * granularity
+        end = now
+        by_epoch: dict[int, dict] = {}
+
+        for _ in range(_MAX_PAGES):
+            resp = await _request({
+                "ticks_history": pair, "style": "candles",
+                "granularity": granularity, "count": _MAX_COUNT, "end": str(end),
+            })
+            if "error" in resp:
+                logger.warning("Deriv time_series error for %s: %s", pair, resp["error"])
+                break
+            for candle in resp.get("candles") or []:
+                by_epoch[int(candle["epoch"])] = candle
+            end -= window
+            if end <= oldest_wanted:
+                break
+
+        # Unfiltered: `span_days` decides how far back to walk, not what to keep.
+        # A page that reaches past the requested window is free history the
+        # chart can pan into.
+        return [by_epoch[epoch] for epoch in sorted(by_epoch)]
+
+    async def _tick_volume(self, symbol: str, bucket_starts: list[int],
+                           granularity: int) -> list[float] | None:
+        """Tick-count volume, or None when it would cost more than it is worth
+        (see _TICK_VOLUME_MAX_SPAN_SECONDS) or when the vendor call fails.
+
+        Enrichment, never a precondition: losing volume must not cost the caller
+        its bars, which is how a broken bridge subprocess used to 404 a chart."""
+        span_seconds = bucket_starts[-1] + granularity - bucket_starts[0]
+        if span_seconds > _TICK_VOLUME_MAX_SPAN_SECONDS:
+            return None
+        try:
+            return await _dukascopy_tick_volume(
+                symbol, bucket_starts[0], bucket_starts[-1] + granularity, bucket_starts,
+            )
+        except Exception:
+            logger.exception("Tick volume failed for %s -- bars are unaffected", symbol)
+            return None
+
     async def get_historical_df(
         self, symbol: str, exchange: str, interval: str, days: int
     ) -> pd.DataFrame | None:
@@ -219,25 +282,12 @@ class DerivProvider:
             return None
         try:
             granularity = _GRANULARITY_MAP.get(interval, 86400)
-            span = clamp_days(interval, days)
-            bars_per_day = _BARS_PER_DAY.get(interval, 1)
-            count = min(int(span * bars_per_day) or 1, _MAX_COUNT)
-
-            resp = await _request({
-                "ticks_history": pair, "style": "candles",
-                "granularity": granularity, "count": count, "end": "latest",
-            })
-            if "error" in resp:
-                logger.warning("Deriv time_series error for %s: %s", pair, resp["error"])
-                return None
-            candles = resp.get("candles") or []
+            candles = await self._fetch_candles(pair, granularity, clamp_days(interval, days))
             if not candles:
                 return None
 
             bucket_starts = [int(c["epoch"]) for c in candles]
-            tick_volume = await _dukascopy_tick_volume(
-                symbol, bucket_starts[0], bucket_starts[-1] + granularity, bucket_starts,
-            )
+            tick_volume = await self._tick_volume(symbol, bucket_starts, granularity)
 
             df = pd.DataFrame(candles)
             df["date"] = pd.to_datetime(df["epoch"], unit="s")

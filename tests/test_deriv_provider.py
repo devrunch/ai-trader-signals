@@ -12,8 +12,9 @@ import pandas as pd
 import pytest
 
 from app.market.providers.deriv_provider import (
-    DerivProvider,
+    _MAX_COUNT,
     KNOWN_PAIRS,
+    DerivProvider,
     deriv_symbol_for,
     tick_volume_since,
 )
@@ -281,3 +282,98 @@ class TestSearch:
     @pytest.mark.asyncio
     async def test_empty_query_matches_nothing(self):
         assert await DerivProvider().search("", limit=8) == []
+
+
+class TestBackwardPaging:
+    """One vendor response reaches back 1000 candles from its own `end` and no
+    further, and a closed market answers with nothing at all -- which used to
+    read as "history ends here" and 404 every weekend 1m chart."""
+
+    @staticmethod
+    def _ws_returning(pages):
+        """A websocket whose recv() yields `pages` in order, then empties."""
+        sent: list[dict] = []
+
+        async def _send(payload):
+            sent.append(json.loads(payload))
+
+        queue = list(pages)
+
+        async def _recv():
+            return json.dumps(queue.pop(0) if queue else {"candles": []})
+
+        ws = AsyncMock()
+        ws.send = AsyncMock(side_effect=_send)
+        ws.recv = AsyncMock(side_effect=_recv)
+        cm = MagicMock()
+        cm.__aenter__ = AsyncMock(return_value=ws)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        return cm, sent
+
+    @pytest.mark.asyncio
+    async def test_an_empty_page_does_not_stop_the_walk(self):
+        # Page 1 empty (the weekend), page 2 holds the last session's bars.
+        cm, sent = self._ws_returning([
+            {"candles": []},
+            {"candles": [{"epoch": 1786752000, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5}]},
+        ])
+        with patch("app.market.providers.deriv_provider.websockets.connect", return_value=cm), \
+             patch("app.market.providers.deriv_provider._dukascopy_tick_volume", return_value=[3.0]):
+            df = await DerivProvider().get_historical_df("XAUUSD", "FOREX", "1m", 5)
+
+        assert df is not None and len(df) == 1
+        assert sent[0]["end"] != sent[1]["end"]
+
+    @pytest.mark.asyncio
+    async def test_each_page_asks_for_a_window_further_back(self):
+        cm, sent = self._ws_returning([])
+        with patch("app.market.providers.deriv_provider.websockets.connect", return_value=cm):
+            await DerivProvider().get_historical_df("XAUUSD", "FOREX", "1m", 5)
+
+        ends = [int(r["end"]) for r in sent]
+        assert len(ends) > 1, "a 5-day 1m span cannot fit in one 1000-candle window"
+        assert ends == sorted(ends, reverse=True)
+        assert ends[0] - ends[1] == _MAX_COUNT * 60
+
+    @pytest.mark.asyncio
+    async def test_a_span_that_fits_in_one_window_is_one_request(self):
+        cm, sent = self._ws_returning([
+            {"candles": [{"epoch": 1786752000, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5}]},
+        ])
+        with patch("app.market.providers.deriv_provider.websockets.connect", return_value=cm), \
+             patch("app.market.providers.deriv_provider._dukascopy_tick_volume", return_value=[1.0]):
+            await DerivProvider().get_historical_df("XAUUSD", "FOREX", "1d", 30)
+
+        assert len(sent) == 1
+
+
+class TestTickVolumeIsOnlyEnrichment:
+    @pytest.mark.asyncio
+    async def test_a_long_window_skips_the_tick_fetch_and_reports_no_volume(self):
+        # Bars a week apart: every tick between them is days of hourly Dukascopy
+        # files fetched to fill two volume numbers.
+        cm, _ = _mock_connect({"candles": [
+            {"epoch": 1786752000, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5},
+            {"epoch": 1786752000 + 7 * 86400, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5},
+        ]})
+        with patch("app.market.providers.deriv_provider.websockets.connect", return_value=cm), \
+             patch("app.market.providers.deriv_provider._dukascopy_tick_volume") as fake:
+            df = await DerivProvider().get_historical_df("XAUUSD", "FOREX", "1m", 7)
+
+        fake.assert_not_called()
+        assert df is not None and df["volume"].isna().all()
+
+    @pytest.mark.asyncio
+    async def test_a_failing_bridge_costs_the_volume_not_the_bars(self):
+        # A broken subprocess used to raise past get_historical_df and 404 the
+        # whole chart.
+        cm, _ = _mock_connect({"candles": [
+            {"epoch": 1786752000, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5},
+        ]})
+        with patch("app.market.providers.deriv_provider.websockets.connect", return_value=cm), \
+             patch("app.market.providers.deriv_provider._dukascopy_tick_volume",
+                   side_effect=RuntimeError("the handler is closed")):
+            df = await DerivProvider().get_historical_df("XAUUSD", "FOREX", "1h", 1)
+
+        assert df is not None and len(df) == 1
+        assert df["volume"].isna().all()

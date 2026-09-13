@@ -5,6 +5,8 @@ frontend expects; everything else is a pass-through.
 """
 from __future__ import annotations
 
+import pandas as pd
+
 from app.market.providers.deriv_provider import deriv_symbol_for, tick_volume_since
 from app.market.providers.dukascopy_bridge import fetch_ticks
 from app.market.providers.registry import market_data_router
@@ -48,6 +50,15 @@ async def search_symbols(query: str, limit: int = 8) -> list[dict]:
     return await market_data_router.search(query, limit)
 
 
+def _volume(value) -> int | None:
+    """None, not 0: "we did not measure this" and "nothing traded" are
+    different answers. Deriv bars carry tick-count volume only for windows
+    short enough to be worth fetching (see DerivProvider._tick_volume), and a
+    zero there would read as a dead market."""
+    if value is None or pd.isna(value):
+        return None
+    return int(value)
+
 async def get_historical(
     symbol: str,
     exchange: str = "NSE",
@@ -67,6 +78,6 @@ async def get_historical(
             "high": round(float(row["high"]), 4),
             "low": round(float(row["low"]), 4),
             "close": round(float(row["close"]), 4),
-            "volume": int(row.get("volume", 0)),
+            "volume": _volume(row.get("volume")),
         })
     return bars
