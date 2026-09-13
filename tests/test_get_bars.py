@@ -48,12 +48,12 @@ class TestRouting:
         assert result.bars == []
 
     @pytest.mark.asyncio
-    async def test_forex_volume_is_labelled_as_tick_derived(self, router):
-        # An equity's volume and a tick count are not the same measurement, and
-        # a caller comparing them without knowing that concludes nonsense.
+    async def test_forex_is_labelled_as_having_no_volume(self, router):
+        # Nothing to compare against an equity's volume: this vendor has none,
+        # and the delayed tick count that stood in for it is gone.
         with _with_history(router, _frame()):
             result = await router.get_bars("EURUSD", "1h", 5)
-        assert result.volume_source is VolumeSource.TICKS
+        assert result.volume_source is VolumeSource.NONE
 
 
 class TestLimits:

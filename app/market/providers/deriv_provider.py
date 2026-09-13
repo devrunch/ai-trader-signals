@@ -30,9 +30,7 @@ keep the same honest 0.0 until it catches up.
 """
 from __future__ import annotations
 
-import bisect
 import logging
-import time
 
 import pandas as pd
 from websockets.exceptions import WebSocketException
@@ -40,7 +38,6 @@ from websockets.exceptions import WebSocketException
 from app.market.contract import ProviderCapabilities, VolumeSource
 from app.market.intervals import clamp_days
 from app.market.paging import walk_back
-from app.market.providers import dukascopy_bridge
 from app.market.providers.deriv_socket import socket_for
 
 logger = logging.getLogger(__name__)
@@ -112,51 +109,6 @@ async def _request(payload: dict) -> dict:
     return await socket_for(WS_URL).request(payload)
 
 
-async def _dukascopy_tick_volume(app_symbol: str, start_epoch: int, end_epoch: int, bucket_starts: list[int]) -> list[float]:
-    """Tick count per candle, as a volume stand-in -- see this module's
-    top-of-file rationale for why this is sourced from Dukascopy, not
-    Deriv. Dukascopy's own instrument codes are this app's symbols
-    lowercased for every pair/metal in KNOWN_PAIRS (confirmed live for
-    XAUUSD, EURUSD, XAGUSD) -- no separate mapping table needed. A vendor
-    gap (an unlisted instrument, the subprocess failing, or -- routinely --
-    the most recent ~15-20 minutes the publish lag hasn't caught up to
-    yet) all fall back to the same honest 0.0 per candle; the caller has
-    no way to tell those apart and does not need to. `bucket_starts` must
-    be sorted ascending -- the caller's `candles` list already is.
-    """
-    counts = await dukascopy_bridge.fetch_tick_counts(
-        app_symbol.lower(), start_epoch * 1000, end_epoch * 1000, bucket_starts,
-    )
-    # A length mismatch means the bridge and this side disagree about the
-    # candles; pandas would otherwise raise deep in the frame build, far from
-    # the cause. Volume is enrichment -- drop it, keep the bars.
-    if not counts or len(counts) != len(bucket_starts):
-        return [0.0] * len(bucket_starts)
-    return counts
-
-
-async def tick_volume_since(app_symbol: str, since_epoch: int) -> int | None:
-    """Real ECN tick count in [since_epoch, now) -- what the terminal polls
-    every few seconds to keep the still-forming candle's volume live.
-    get_historical_df's own bucketed volume only refreshes on a fresh fetch
-    (a new chart load, a pan-back), so without this the current candle sat
-    at whatever it was when that fetch ran, same "not live" gap this exists
-    to close.
-
-    None means "not a Dukascopy-covered instrument, or the vendor call
-    itself failed" -- the caller must not treat that as 0 ticks, a real and
-    different answer (see fetch_tick_timestamps' own docstring for why a gap
-    and a genuine empty range are indistinguishable one level down, but
-    "not covered at all" is knowable here before ever calling it)."""
-    if deriv_symbol_for(app_symbol) is None:
-        return None
-    now_ms = int(time.time() * 1000)
-    ticks_ms = await dukascopy_bridge.fetch_tick_timestamps(app_symbol.lower(), since_epoch * 1000, now_ms)
-    if ticks_ms is None:
-        return None
-    return len(ticks_ms)
-
-
 class DerivProvider:
     capabilities = ProviderCapabilities(
         intervals=frozenset(_GRANULARITY_MAP),
@@ -165,8 +117,11 @@ class DerivProvider:
         # published retention -- Deriv documents none, and these are what the
         # walk can actually reach.
         max_days_by_interval={"1m": 7, "5m": 30, "15m": 90, "30m": 180, "1h": 365, "1d": 3650},
-        volume_source=VolumeSource.TICKS,
-        supports_ticks=False,           # tick counts come from Dukascopy, not here
+        # Deriv publishes no volume for spot/CFD forex in either style, and the
+        # Dukascopy tick count that used to stand in for it ran ~15 minutes
+        # behind -- on a 1m chart that reads as live and is not.
+        volume_source=VolumeSource.NONE,
+        supports_ticks=False,
         anchors_window_on_end=True,
     )
 
@@ -254,28 +209,6 @@ class DerivProvider:
         df["date"] = pd.to_datetime(df["epoch"], unit="s")
         return df.set_index("date").sort_index()
 
-    async def _tick_volume(self, symbol: str, bucket_starts: list[int],
-                           granularity: int) -> list[float | None] | None:
-        """Tick-count volume, or None when it would cost more than it is worth
-        (see _TICK_VOLUME_MAX_SPAN_SECONDS) or when the vendor call fails.
-
-        Enrichment, never a precondition: losing volume must not cost the caller
-        its bars, which is how a broken bridge subprocess used to 404 a chart."""
-        # Measure the most recent stretch only, rather than all-or-nothing: a
-        # chart that paged back 40 days still gets volume on the part anyone is
-        # looking at, and older bars carry null -- not measured, not zero.
-        end = bucket_starts[-1] + granularity
-        first = bisect.bisect_left(bucket_starts, end - _TICK_VOLUME_MAX_SPAN_SECONDS)
-        recent = bucket_starts[first:]
-        if not recent:
-            return None
-        try:
-            counts = await _dukascopy_tick_volume(symbol, recent[0], end, recent)
-        except Exception:
-            logger.exception("Tick volume failed for %s -- bars are unaffected", symbol)
-            return None
-        return [None] * first + list(counts)
-
     async def get_historical_df(
         self, symbol: str, exchange: str, interval: str, days: int
     ) -> pd.DataFrame | None:
@@ -295,14 +228,13 @@ class DerivProvider:
                 return None
 
             df = walk.df
-            # astype("datetime64[s]") first: pandas keeps the resolution it was
-            # built with, so a bare astype("int64") is seconds here and
-            # nanoseconds elsewhere depending on how the frame was made.
-            bucket_starts = [int(e) for e in df.index.astype("datetime64[s]").astype("int64")]
-            tick_volume = await self._tick_volume(symbol, bucket_starts, granularity)
             for col in ("open", "high", "low", "close"):
                 df[col] = df[col].astype(float)
-            df["volume"] = tick_volume
+            # No volume at all, rather than a number that would be wrong. Deriv
+            # publishes none for spot/CFD forex, and the Dukascopy tick count
+            # that used to stand in for it ran ~15 minutes behind -- on a 1m
+            # chart that reads as live and is not.
+            df["volume"] = None
             return df[["open", "high", "low", "close", "volume"]]
         except _VENDOR_ERRORS as e:
             logger.warning("Deriv historical fetch failed for %s/%s: %s", symbol, exchange, e)

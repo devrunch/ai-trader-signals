@@ -19,7 +19,7 @@ const input = JSON.parse(await new Promise((resolve) => {
   process.stdin.on("end", () => resolve(data));
 }));
 
-const { instrument, fromMs, toMs, includePrice, bucketStartsSec } = input;
+const { instrument, fromMs, toMs, includePrice } = input;
 const data = await getHistoricRates({
   instrument,
   dates: { from: new Date(fromMs), to: new Date(toMs) },
@@ -34,27 +34,8 @@ const data = await getHistoricRates({
   pauseBetweenBatchesMs: 100,
 });
 
-// Counting here rather than shipping the ticks: a 48-hour window is
-// millions of timestamps, and writing them as JSON for the caller to bucket
-// cost more than fetching them did. The counts are one number per candle.
-if (bucketStartsSec) {
-  const counts = new Array(bucketStartsSec.length).fill(0);
-  for (const tick of data) {
-    const seconds = Math.floor(tick.timestamp / 1000);
-    // Binary search: the bucket starts are sorted, and a linear scan per
-    // tick over millions of ticks is not.
-    let lo = 0, hi = bucketStartsSec.length - 1, idx = -1;
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1;
-      if (bucketStartsSec[mid] <= seconds) { idx = mid; lo = mid + 1; } else { hi = mid - 1; }
-    }
-    if (idx >= 0) counts[idx] += 1;
-  }
-  process.stdout.write(JSON.stringify(counts));
-} else {
-  process.stdout.write(JSON.stringify(
-    includePrice
-      ? data.map((tick) => ({ t: tick.timestamp, p: (tick.bidPrice + tick.askPrice) / 2 }))
-      : data.map((tick) => tick.timestamp),
-  ));
-}
+process.stdout.write(JSON.stringify(
+  includePrice
+    ? data.map((tick) => ({ t: tick.timestamp, p: (tick.bidPrice + tick.askPrice) / 2 }))
+    : data.map((tick) => tick.timestamp),
+));

@@ -5,7 +5,7 @@ frontend expects; everything else is a pass-through.
 """
 from __future__ import annotations
 
-from app.market.providers.deriv_provider import deriv_symbol_for, tick_volume_since
+from app.market.providers.deriv_provider import deriv_symbol_for
 from app.market.providers.dukascopy_bridge import fetch_ticks
 from app.market.providers.registry import market_data_router
 
@@ -19,15 +19,6 @@ MAX_TICKS_WINDOW_SECONDS = 4 * 60 * 60
 async def get_quote(symbol: str, exchange: str = "NSE") -> dict | None:
     """Current price data for an equity or forex pair. exchange = NSE | BSE | FOREX | ..."""
     return await market_data_router.get_quote(symbol, exchange)
-
-
-async def get_tick_volume(symbol: str, since_epoch: int) -> int | None:
-    """Real-time ECN tick count since `since_epoch` (Unix seconds) -- the
-    still-forming candle's live volume, polled by the chart rather than
-    waiting on the next historical fetch. FOREX/metals only (Dukascopy);
-    None for anything else, or a real vendor gap -- see tick_volume_since's
-    own docstring for why that must not collapse to 0."""
-    return await tick_volume_since(symbol, since_epoch)
 
 
 async def get_ticks(symbol: str, since_epoch: int, until_epoch: int) -> list[dict] | None:

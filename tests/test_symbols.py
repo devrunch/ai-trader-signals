@@ -20,11 +20,11 @@ class TestForexAndMetals:
         assert symbols.resolve("XAUUSD").asset_class is AssetClass.METAL
         assert symbols.resolve("EURUSD").asset_class is AssetClass.FX
 
-    def test_forex_volume_is_tick_derived_not_exchange_volume(self):
-        # Deriv has no volume of its own; what the chart shows is a Dukascopy
-        # tick count. A caller that thinks it is exchange volume will compare
-        # it against equities and conclude nonsense.
-        assert symbols.resolve("EURUSD").volume_source is VolumeSource.TICKS
+    def test_forex_reports_no_volume_at_all(self):
+        # Deriv publishes none for spot/CFD forex. A Dukascopy tick count used
+        # to stand in for it and was dropped: ~15 minutes behind real time,
+        # which on a 1m chart reads as live and is not.
+        assert symbols.resolve("EURUSD").volume_source is VolumeSource.NONE
 
     def test_they_carry_the_forex_session(self):
         assert symbols.resolve("XAUUSD").session is sessions.FX

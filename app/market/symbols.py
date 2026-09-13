@@ -56,7 +56,9 @@ def resolve(symbol: str, hint_exchange: str | None = None) -> SymbolInfo | None:
             asset_class=AssetClass.METAL if symbol in _METALS else AssetClass.FX,
             exchange="FOREX",
             session=sessions.FX,
-            volume_source=VolumeSource.TICKS,      # Dukascopy ticks, not exchange volume
+            # Deriv publishes no volume for spot/CFD forex, and a delayed
+            # tick count is worse than none on a 1m chart.
+            volume_source=VolumeSource.NONE,
             intervals=_INTRADAY_AND_DAILY,
         )
 

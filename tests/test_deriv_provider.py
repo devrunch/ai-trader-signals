@@ -17,7 +17,6 @@ from app.market.providers.deriv_provider import (
     KNOWN_PAIRS,
     DerivProvider,
     deriv_symbol_for,
-    tick_volume_since,
 )
 
 
@@ -166,138 +165,6 @@ class TestGetHistoricalDf:
             assert await DerivProvider().get_historical_df("XAUUSD", "FOREX", "1d", 10) is None
 
 
-class TestDukascopyTickVolume:
-    """Deriv gives no real volume for spot/CFD forex in either style --
-    get_historical_df's volume column instead comes from Dukascopy (see
-    dukascopy_bridge.py and deriv_provider.py's own module docstring).
-    The bucketing itself happens inside the bridge, so what matters here is
-    that the window and the buckets are handed over, and that a gap is a 0."""
-
-    @pytest.mark.asyncio
-    async def test_the_bridge_is_asked_to_count_into_our_candles(self):
-        bucket_starts = [1786752000, 1786752060, 1786752120]      # 1m candles
-        with patch(
-            "app.market.providers.deriv_provider.dukascopy_bridge.fetch_tick_counts",
-            return_value=[2.0, 1.0, 0.0],
-        ) as fake:
-            from app.market.providers.deriv_provider import _dukascopy_tick_volume
-            counts = await _dukascopy_tick_volume(
-                "XAUUSD", bucket_starts[0], bucket_starts[-1] + 60, bucket_starts)
-
-        assert counts == [2.0, 1.0, 0.0]
-        fake.assert_called_once_with(
-            "xauusd", bucket_starts[0] * 1000, (bucket_starts[-1] + 60) * 1000,
-            bucket_starts,
-        )
-
-    @pytest.mark.asyncio
-    async def test_a_vendor_gap_falls_back_to_zero_for_every_candle(self):
-        # Live finding: Dukascopy's publish lag (~15-20 min, confirmed live)
-        # means a range reaching up to "now" routinely comes back with no
-        # ticks at all for its most recent stretch -- same honest 0.0 as any
-        # other vendor gap, not a special case.
-        bucket_starts = [1786752000, 1786752060]
-        with patch("app.market.providers.deriv_provider.dukascopy_bridge.fetch_tick_counts",
-                   return_value=None):
-            from app.market.providers.deriv_provider import _dukascopy_tick_volume
-            counts = await _dukascopy_tick_volume(
-                "XAUUSD", bucket_starts[0], bucket_starts[-1] + 60, bucket_starts)
-
-        assert counts == [0.0, 0.0]
-
-    @pytest.mark.asyncio
-    async def test_an_empty_result_also_falls_back_to_zero(self):
-        bucket_starts = [1786752000, 1786752060]
-        with patch("app.market.providers.deriv_provider.dukascopy_bridge.fetch_tick_counts",
-                   return_value=[]):
-            from app.market.providers.deriv_provider import _dukascopy_tick_volume
-            counts = await _dukascopy_tick_volume(
-                "XAUUSD", bucket_starts[0], bucket_starts[-1] + 60, bucket_starts)
-
-        assert counts == [0.0, 0.0]
-
-    @pytest.mark.asyncio
-    async def test_a_count_per_candle_is_required(self):
-        # The bridge counts now, so a length mismatch means the two sides
-        # disagree about the candles -- silently pandas would broadcast or
-        # raise deep in the frame build, well away from the cause.
-        bucket_starts = [1786752000, 1786752060, 1786752120]
-        with patch("app.market.providers.deriv_provider.dukascopy_bridge.fetch_tick_counts",
-                   return_value=[1.0, 2.0]):
-            from app.market.providers.deriv_provider import _dukascopy_tick_volume
-            counts = await _dukascopy_tick_volume(
-                "XAUUSD", bucket_starts[0], bucket_starts[-1] + 60, bucket_starts)
-
-        assert counts == [0.0, 0.0, 0.0]
-
-class TestGetHistoricalDfVolumeWiring:
-    """get_historical_df's own use of the Dukascopy result -- patches
-    _dukascopy_tick_volume directly rather than the subprocess, since that
-    orchestration is already covered above."""
-
-    CANDLES = [
-        {"epoch": 1786752000, "open": 2600.0, "high": 2610.0, "low": 2595.0, "close": 2605.0},
-        {"epoch": 1786755600, "open": 2605.0, "high": 2620.0, "low": 2600.0, "close": 2615.0},
-    ]
-
-    @pytest.mark.asyncio
-    async def test_the_tick_volume_lands_in_the_volume_column(self):
-        cm, _ = _mock_connect({"candles": self.CANDLES})
-        with patch("app.market.providers.deriv_socket.websockets.connect", cm), \
-             patch("app.market.providers.deriv_provider._dukascopy_tick_volume", return_value=[7.0, 12.0]) as fake:
-            df = await DerivProvider().get_historical_df("XAUUSD", "FOREX", "1h", 1)
-
-        assert list(df["volume"]) == [7.0, 12.0]
-        fake.assert_called_once_with("XAUUSD", 1786752000, 1786755600 + 3600, [1786752000, 1786755600])
-
-
-class TestTickVolumeSince:
-    """Powers the terminal's 5-second live-volume poll for the still-forming
-    candle -- see market/router.py's /tick-volume/{symbol}."""
-
-    @pytest.mark.asyncio
-    async def test_counts_real_ticks_since_the_given_epoch(self):
-        with patch(
-            "app.market.providers.deriv_provider.dukascopy_bridge.fetch_tick_timestamps",
-            return_value=[1_000, 2_000, 3_000],
-        ) as fake:
-            count = await tick_volume_since("XAUUSD", 1786752000)
-
-        assert count == 3
-        args = fake.call_args[0]
-        assert args[0] == "xauusd"
-        assert args[1] == 1786752000 * 1000
-
-    @pytest.mark.asyncio
-    async def test_a_symbol_not_covered_by_deriv_returns_none_without_calling_dukascopy(self):
-        with patch(
-            "app.market.providers.deriv_provider.dukascopy_bridge.fetch_tick_timestamps",
-        ) as fake:
-            count = await tick_volume_since("RELIANCE", 1786752000)
-
-        assert count is None
-        fake.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_a_vendor_gap_returns_none_not_zero(self):
-        # None (couldn't ask) and 0 (asked, got nothing) are different
-        # answers -- collapsing them would show a confidently wrong "no
-        # trading activity" instead of an honest "couldn't check right now".
-        with patch(
-            "app.market.providers.deriv_provider.dukascopy_bridge.fetch_tick_timestamps",
-            return_value=None,
-        ):
-            assert await tick_volume_since("XAUUSD", 1786752000) is None
-
-    @pytest.mark.asyncio
-    async def test_a_genuinely_empty_tick_list_is_a_real_zero(self):
-        with patch(
-            "app.market.providers.deriv_provider.dukascopy_bridge.fetch_tick_timestamps",
-            return_value=[],
-        ):
-            assert await tick_volume_since("XAUUSD", 1786752000) == 0
-
-
 class TestSearch:
     @pytest.mark.asyncio
     async def test_gold_matches_xauusd(self):
@@ -341,9 +208,7 @@ class TestBackwardPaging:
                              "low": 0.5, "close": 1.5}]},
             ],
         )
-        with patch("app.market.providers.deriv_socket.websockets.connect", connect), \
-             patch("app.market.providers.deriv_provider._dukascopy_tick_volume",
-                   return_value=[3.0]):
+        with patch("app.market.providers.deriv_socket.websockets.connect", connect):
             df = await DerivProvider().get_historical_df("XAUUSD", "FOREX", "1m", 5)
 
         assert df is not None and len(df) == 1
@@ -368,9 +233,7 @@ class TestBackwardPaging:
             {"candles": [{"epoch": 1786752000, "open": 1.0, "high": 2.0,
                           "low": 0.5, "close": 1.5}]},
         )
-        with patch("app.market.providers.deriv_socket.websockets.connect", connect), \
-             patch("app.market.providers.deriv_provider._dukascopy_tick_volume",
-                   return_value=[1.0]):
+        with patch("app.market.providers.deriv_socket.websockets.connect", connect):
             await DerivProvider().get_historical_df("XAUUSD", "FOREX", "1d", 30)
 
         assert len(ws.sent) == 1
@@ -395,38 +258,3 @@ class TestBackwardPaging:
         assert len(ws.sent) > 1
         assert opened == 1
 
-class TestTickVolumeIsOnlyEnrichment:
-    @pytest.mark.asyncio
-    async def test_only_the_recent_stretch_of_a_long_window_is_measured(self):
-        # Bars a week apart: every tick between them is days of hourly Dukascopy
-        # files fetched to fill two volume numbers.
-        cm, _ = _mock_connect({"candles": [
-            {"epoch": 1786752000, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5},
-            {"epoch": 1786752000 + 7 * 86400, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5},
-        ]})
-        with patch("app.market.providers.deriv_socket.websockets.connect", cm), \
-             patch("app.market.providers.deriv_provider._dukascopy_tick_volume",
-                   return_value=[9.0]) as fake:
-            df = await DerivProvider().get_historical_df("XAUUSD", "FOREX", "1m", 7)
-
-        # Only the recent end is measured: the week-old bar is out of reach.
-        assert fake.call_count == 1
-        assert fake.call_args[0][3] == [1786752000 + 7 * 86400]
-        assert df is not None
-        assert pd.isna(df["volume"].iloc[0])
-        assert df["volume"].iloc[-1] == 9.0
-
-    @pytest.mark.asyncio
-    async def test_a_failing_bridge_costs_the_volume_not_the_bars(self):
-        # A broken subprocess used to raise past get_historical_df and 404 the
-        # whole chart.
-        cm, _ = _mock_connect({"candles": [
-            {"epoch": 1786752000, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5},
-        ]})
-        with patch("app.market.providers.deriv_socket.websockets.connect", cm), \
-             patch("app.market.providers.deriv_provider._dukascopy_tick_volume",
-                   side_effect=RuntimeError("the handler is closed")):
-            df = await DerivProvider().get_historical_df("XAUUSD", "FOREX", "1h", 1)
-
-        assert df is not None and len(df) == 1
-        assert df["volume"].isna().all()

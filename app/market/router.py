@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from app.market.contract import BarsStatus
 from app.market.live_ticks import LiveTicks
 from app.market.providers.registry import market_data_router
-from app.market.service import get_quote, get_tick_volume, get_ticks, search_symbols
+from app.market.service import get_quote, get_ticks, search_symbols
 
 router = APIRouter()
 
@@ -102,19 +102,6 @@ async def historical(
         "volumeSource": result.volume_source.value,
         "truncatedToDays": result.truncated_to_days,
     }
-
-
-@router.get("/tick-volume/{symbol}")
-async def tick_volume(
-    symbol: str,
-    since: int = Query(description="Unix epoch seconds -- real ticks counted from here to now"),
-):
-    """Live tick-count volume for the chart's still-forming candle, polled
-    every few seconds while it's open. FOREX/metals only -- `count: null`
-    means this symbol isn't Dukascopy-covered or the vendor call failed,
-    never a fabricated 0 (see get_tick_volume's own docstring)."""
-    count = await get_tick_volume(symbol.upper(), since)
-    return {"symbol": symbol.upper(), "since": since, "count": count}
 
 
 @router.get("/ticks/{symbol}")

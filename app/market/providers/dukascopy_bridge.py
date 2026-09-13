@@ -60,39 +60,6 @@ async def _run_bridge(payload: dict, instrument: str, timeout_s: float):
         return None
 
 
-async def fetch_tick_timestamps(instrument: str, from_ms: int, to_ms: int, timeout_s: float = 15.0) -> list[int] | None:
-    """Raw tick epoch-milliseconds for `instrument` in [from_ms, to_ms), or
-    None on any failure -- a real vendor gap and a subprocess/parse error
-    are both "we don't have this," not different cases the caller needs to
-    tell apart.
-
-    Dukascopy's own publish lag (confirmed live: ~15-20 minutes behind
-    real time) means a range reaching up to "now" will come back missing
-    its most recent stretch -- not a bug here, the caller's bucketing
-    already treats an uncovered candle as 0.0, the same honest fallback
-    used everywhere else in this app for a window a vendor hasn't
-    published yet.
-    """
-    return await _run_bridge({"instrument": instrument, "fromMs": from_ms, "toMs": to_ms}, instrument, timeout_s)
-
-
-async def fetch_tick_counts(instrument: str, from_ms: int, to_ms: int,
-                            bucket_starts_sec: list[int],
-                            timeout_s: float = 20.0) -> list[float] | None:
-    """Tick count per bucket, counted in the bridge rather than here.
-
-    Same data as fetch_tick_timestamps, minus the cost of carrying it: a
-    48-hour window is millions of timestamps, and serialising them through a
-    pipe for Python to bucket took longer than the vendor fetch itself.
-    None on any failure, as everywhere else here."""
-    counts = await _run_bridge(
-        {"instrument": instrument, "fromMs": from_ms, "toMs": to_ms,
-         "bucketStartsSec": bucket_starts_sec},
-        instrument, timeout_s,
-    )
-    return None if counts is None else [float(c) for c in counts]
-
-
 async def fetch_ticks(instrument: str, from_ms: int, to_ms: int, timeout_s: float = 15.0) -> list[dict] | None:
     """Real ticks with price for `instrument` in [from_ms, to_ms) -- each
     `{"t": epoch_ms, "p": mid_price}`, mid being Dukascopy's own bid/ask
