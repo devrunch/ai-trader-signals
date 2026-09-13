@@ -123,3 +123,29 @@ class TestEmptyResults:
             result = await router.get_bars("XAUUSD", "1m", 1)
 
         assert result.status is BarsStatus.VENDOR_ERROR
+
+    @pytest.mark.asyncio
+    async def test_an_unlisted_symbol_is_not_told_the_market_is_closed(self, router):
+        # The confident lie this guards against: NOTAREALSYMBOL resolved to the
+        # fallback vendor, the session happened to be shut, and the answer was
+        # "NASDAQ is closed" about a symbol that does not exist anywhere.
+        with _with_history(router, None), \
+             patch("app.market.providers.registry.datetime") as clock:
+            clock.now.return_value = pd.Timestamp("2026-09-12 12:00", tz="UTC").to_pydatetime()
+            result = await router.get_bars("NOTAREALSYMBOL", "1d", 5)
+
+        assert result.status is BarsStatus.NO_DATA
+        assert "may not be listed" in result.reason
+
+    @pytest.mark.asyncio
+    async def test_a_listed_symbol_is_told_the_market_is_closed(self, router):
+        # Same empty answer, but the vendor confirms the listing, so the closed
+        # session is the real explanation and worth giving.
+        kite = router.by_provider["kite"]
+        with _with_history(router, None), \
+             patch.object(kite, "knows_symbol", return_value=True, create=True), \
+             patch("app.market.providers.registry.datetime") as clock:
+            clock.now.return_value = pd.Timestamp("2026-09-12 12:00", tz="UTC").to_pydatetime()
+            result = await router.get_bars("RELIANCE", "1d", 5, exchange="NSE")
+
+        assert result.status is BarsStatus.CLOSED_MARKET

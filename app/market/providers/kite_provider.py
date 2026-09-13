@@ -209,6 +209,16 @@ class KiteProvider:
         }
         self._instruments_loaded_at = self._now()
 
+    def knows_symbol(self, symbol: str, exchange: str) -> bool:
+        """Whether the already-loaded instrument dump lists this symbol.
+
+        No network, and False when the dump has not loaded yet -- this only
+        ever confirms, never denies. Its caller uses it to decide whether it
+        may say "the exchange is closed" about an empty result, which is a
+        claim worth being sure of: it is a lie about a symbol that is simply
+        not listed."""
+        return self._resolve_row(symbol, exchange) is not None
+
     def _resolve_row(self, symbol: str, exchange: str) -> dict[str, Any] | None:
         """The instrument row a symbol actually means -- direct lookup for
         everything except an MCX continuous symbol ("GOLD1!", "GOLD2!", ...),

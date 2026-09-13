@@ -151,13 +151,24 @@ class MarketDataRouter:
 
         df = await self.get_historical_df(symbol, info.exchange, interval, span)
         if df is None or df.empty:
-            return self._empty_result(info, caps.volume_source, truncated)
+            known = info.authoritative or self._provider_knows(provider, info)
+            return self._empty_result(info, caps.volume_source, truncated, known=known)
 
         return BarsResult(to_bars(df), BarsStatus.OK, info, caps.volume_source,
                           truncated_to_days=truncated)
 
+    @staticmethod
+    def _provider_knows(provider, info) -> bool:
+        """Whether the vendor can confirm this symbol is real without a call.
+
+        Kite can: it already holds the instrument dump. Nobody else can, and a
+        guess in either direction is worse than saying we do not know.
+        """
+        knows = getattr(provider, "knows_symbol", None)
+        return bool(knows and knows(info.symbol, info.exchange))
+
     def _empty_result(self, info, volume_source: VolumeSource,
-                      truncated: int | None) -> BarsResult:
+                      truncated: int | None, known: bool = True) -> BarsResult:
         """Why nothing came back.
 
         A closed market is knowable here and is the common case -- forex over a
@@ -167,12 +178,23 @@ class MarketDataRouter:
         reported as a vendor error, which is the direction that gets looked
         at rather than silently ignored."""
         now = datetime.now(UTC)
-        if not info.session.is_open(now):
+        closed = not info.session.is_open(now)
+        if closed and known:
             opens = info.session.next_open(now)
             when = f" until {opens:%Y-%m-%d %H:%M} UTC" if opens else ""
             return BarsResult([], BarsStatus.CLOSED_MARKET, info, volume_source,
                               reason=f"{info.exchange} is closed{when}",
                               truncated_to_days=truncated)
+        if not known:
+            # Both possibilities, neither claimed: an unlisted symbol and a
+            # quiet session look identical from here, and picking one is how a
+            # typo becomes "the market is closed".
+            aside = " (the session is also closed)" if closed else ""
+            return BarsResult(
+                [], BarsStatus.NO_DATA, info, volume_source,
+                reason=f"No bars for {info.symbol} on {info.exchange}; "
+                       f"the symbol may not be listed there{aside}",
+                truncated_to_days=truncated)
         return BarsResult([], BarsStatus.VENDOR_ERROR, info, volume_source,
                           reason=f"No bars returned for {info.symbol} and the session is open",
                           truncated_to_days=truncated)

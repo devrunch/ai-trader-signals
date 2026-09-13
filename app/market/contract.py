@@ -99,6 +99,12 @@ class SymbolInfo:
     session: SessionSpec
     volume_source: VolumeSource
     intervals: frozenset[str] = field(default_factory=frozenset)
+    # True when a real listing table says this symbol exists (Deriv's pair
+    # table). False when we merely assumed a vendor could serve it, which is
+    # every unrecognised string: the fallback vendor accepts anything and
+    # answers with nothing, and "NASDAQ is closed" is a confident lie to tell
+    # about a symbol that does not exist.
+    authoritative: bool = True
 
 
 @dataclass(frozen=True)

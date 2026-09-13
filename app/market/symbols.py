@@ -70,6 +70,9 @@ def resolve(symbol: str, hint_exchange: str | None = None) -> SymbolInfo | None:
             session=sessions.MCX if hint == "MCX" else sessions.NSE,
             volume_source=VolumeSource.EXCHANGE,
             intervals=_INTRADAY_AND_DAILY,
+            # The hint named a venue; whether that venue lists this symbol is
+            # Kite's instrument dump to answer, not ours.
+            authoritative=False,
         )
 
     # Everything else is the fallback vendor's: US listings, and any symbol a
@@ -84,6 +87,7 @@ def resolve(symbol: str, hint_exchange: str | None = None) -> SymbolInfo | None:
         session=sessions.US_EQUITY if exchange in {"NASDAQ", "NYSE"} else sessions.ALWAYS_OPEN,
         volume_source=VolumeSource.EXCHANGE,
         intervals=_INTRADAY_AND_DAILY,
+        authoritative=False,
     )
 
 
