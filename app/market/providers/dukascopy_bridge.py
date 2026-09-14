@@ -60,6 +60,21 @@ async def _run_bridge(payload: dict, instrument: str, timeout_s: float):
         return None
 
 
+async def fetch_bars(instrument: str, from_ms: int, to_ms: int,
+                     timeframe: str = "m1", timeout_s: float = 30.0) -> list[dict] | None:
+    """OHLC bars for `instrument` in [from_ms, to_ms), or None on failure.
+
+    The event desk measures what price did in the hour after a release,
+    across years of releases. As ticks that is millions of rows per event
+    and as minute bars it is sixty -- and nothing about a reaction study
+    needs tick resolution."""
+    return await _run_bridge(
+        {"instrument": instrument, "fromMs": from_ms, "toMs": to_ms,
+         "timeframe": timeframe},
+        instrument, timeout_s,
+    )
+
+
 async def fetch_ticks(instrument: str, from_ms: int, to_ms: int, timeout_s: float = 15.0) -> list[dict] | None:
     """Real ticks with price for `instrument` in [from_ms, to_ms) -- each
     `{"t": epoch_ms, "p": mid_price}`, mid being Dukascopy's own bid/ask

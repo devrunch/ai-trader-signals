@@ -17,6 +17,7 @@ import signal
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from app.events import watcher as event_watcher
 from app.worker.scheduler import IST, JOB_DEFAULTS, redis_jobstore
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,10 @@ def build_scheduler(jobstore=None) -> AsyncIOScheduler:
 
 async def serve() -> None:
     scheduler = build_scheduler(redis_jobstore(JOBS_KEY, RUN_TIMES_KEY))
+    # The event watcher books its own one-off wake-ups on this scheduler
+    # (one per high-impact release, two hours ahead), so it needs the
+    # instance rather than a cron entry of its own.
+    event_watcher.bind(scheduler)
     scheduler.start()
     logger.info("newsd started with %d job(s): %s", len(SCHEDULE), ", ".join(SCHEDULE))
 

@@ -11,10 +11,14 @@ from one that fetched fine and found a quiet day.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 
-from app.events import telegram
+from app.events import brief as brief_mod
+from app.events import history, reaction, telegram, watcher
 from app.events.agenda import WATCHED_CURRENCIES, build
-from app.events.calendar import Impact, fetch_week, upcoming
+from app.events.calendar import CalendarEvent, Impact, fetch_week, upcoming
+from app.llm.client import get_llm
+from app.market.providers.registry import market_data_router
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +41,47 @@ async def run_agenda() -> dict:
         return {"ok": True, "events": 0, "sent": False}
 
     sent = await telegram.send(message)
-    logger.info("Agenda: %d events (%d high), sent=%s", len(relevant),
-                sum(1 for e in relevant if e.impact is Impact.HIGH), sent)
-    return {"ok": sent, "events": len(relevant), "sent": sent}
+    # Arming happens whether or not the push landed: a delivery failure must
+    # not also cost him every brief for the rest of the week.
+    armed = watcher.arm(relevant)
+    logger.info("Agenda: %d events (%d high), sent=%s, armed=%d", len(relevant),
+                sum(1 for e in relevant if e.impact is Impact.HIGH), sent, len(armed))
+    return {"ok": sent, "events": len(relevant), "sent": sent, "armed": len(armed)}
+
+
+async def send_event_brief(currency: str, title: str, when_iso: str) -> dict:
+    """One release, about two hours out: spec, measured reaction, situation.
+
+    Scheduled by the watcher off the calendar, so the arguments carry the
+    event rather than re-fetching a feed that may have moved on.
+    """
+    event = CalendarEvent(
+        title=title, currency=currency, when=datetime.fromisoformat(when_iso),
+        impact=Impact.HIGH, forecast=None, previous=None,
+    )
+    # The feed carries the forecast, and it is often revised after the sweep
+    # that armed this. Worth one fetch; the brief still goes without it.
+    fresh = await fetch_week()
+    if fresh:
+        for candidate in fresh:
+            if candidate.key == event.key and candidate.when == event.when:
+                event = candidate
+                break
+
+    stats = None
+    rows = history.past_prints(currency, title)
+    if rows:
+        instances = reaction.instances_from_history(list(rows), limit=10)
+        measured = await reaction.measure(brief_mod.GOLD, instances)
+        stats = reaction.aggregate(event.key, brief_mod.GOLD, measured)
+
+    quote = await market_data_router.get_quote(brief_mod.GOLD, "FOREX")
+    price = (quote or {}).get("ltp")
+
+    situation = await brief_mod._situation(get_llm(), event, stats, price)
+    message = brief_mod.render(event, stats, price, situation, now=datetime.now(UTC))
+    sent = await telegram.send(message)
+    logger.info("Brief for %s sent=%s (sample=%s, situation=%s)",
+                event.key, sent, getattr(stats, "sample", None), bool(situation))
+    return {"ok": sent, "event": event.key, "sample": getattr(stats, "sample", 0),
+            "situation": bool(situation), "sent": sent}
