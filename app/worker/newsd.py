@@ -25,6 +25,10 @@ logger = logging.getLogger(__name__)
 # 15-minute runs would spend by mid-afternoon.
 SCHEDULE: dict[str, tuple[str, dict]] = {
     "news-analysis": ("app.worker.news_job:run_news_analysis", {"minute": 0}),
+    # The day's agenda, before the London session opens for him (08:00 Dubai
+    # is 04:00 UTC). Free to produce -- calendar plus each release's own
+    # published spec, no model in the path.
+    "event-agenda": ("app.events.job:run_agenda", {"minute": 0, "hour": 4}),
 }
 
 # Its own keys -- see redis_jobstore's docstring.

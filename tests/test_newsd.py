@@ -23,10 +23,11 @@ async def _jobs():
         sched.shutdown(wait=False)
 
 
-async def test_it_runs_the_news_job_and_nothing_else():
-    # The terminal's jobs stay in the terminal's process; the whole point of
-    # this one is that it can be memory-capped on its own.
-    assert set(await _jobs()) == {"news-analysis"}
+async def test_it_runs_the_desk_jobs_and_none_of_the_terminals():
+    # newsd owns the reading and the event desk; the terminal's jobs stay in
+    # the terminal's process, which is what lets this one be memory-capped
+    # and killed on its own.
+    assert set(await _jobs()) == {"news-analysis", "event-agenda"}
     assert set(newsd.SCHEDULE) & set(terminal_scheduler.SCHEDULE) == set()
 
 

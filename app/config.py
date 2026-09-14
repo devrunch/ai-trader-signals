@@ -207,6 +207,11 @@ class Settings(BaseSettings):
     # Healthchecks.io project API key; scheduled jobs ping their checks. Empty disables pinging.
     healthchecks_api_key: str = ""
 
+    # The event desk's only delivery channel. Both must be set for a brief to
+    # reach anyone; the job says so rather than failing silently.
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+
 
     # pydantic-settings defaults to extra='forbid', so any key present in .env
     # but not declared here raises at import time. Docker hides this (compose
