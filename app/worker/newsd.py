@@ -30,6 +30,9 @@ SCHEDULE: dict[str, tuple[str, dict]] = {
     # is 04:00 UTC). Free to produce -- calendar plus each release's own
     # published spec, no model in the path.
     "event-agenda": ("app.events.job:run_agenda", {"minute": 0, "hour": 4}),
+    # After the day's briefs have all had their chance to fire, and before
+    # tomorrow's are armed: did anything we promised go missing?
+    "event-watchdog": ("app.events.job:run_watchdog", {"minute": 30, "hour": 3}),
 }
 
 # Its own keys -- see redis_jobstore's docstring.

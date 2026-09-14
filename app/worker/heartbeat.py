@@ -8,6 +8,7 @@ monitoring must not break the job it watches.
 from __future__ import annotations
 
 import functools
+import inspect
 import json
 import logging
 import threading
@@ -63,8 +64,25 @@ def _did_its_job(result: object) -> bool:
 
 
 def monitored(slug):
-    """Ping the check named `slug` (or returned by `slug()`) after each run."""
+    """Ping the check named `slug` (or returned by `slug()`) after each run.
+
+    Works on sync and async jobs alike: the event desk runs on the loop
+    inside newsd, and a decorator that silently returned a coroutine object
+    would ping "succeeded" before the job had done anything at all."""
     def decorate(fn):
+        if inspect.iscoroutinefunction(fn):
+            @functools.wraps(fn)
+            async def async_wrapper(*args, **kwargs):
+                name = slug() if callable(slug) else slug
+                try:
+                    result = await fn(*args, **kwargs)
+                except Exception as e:
+                    ping(name, ok=False, body=f"raised {type(e).__name__}: {e}")
+                    raise
+                ping(name, ok=_did_its_job(result), body=json.dumps(result, default=str))
+                return result
+            return async_wrapper
+
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             name = slug() if callable(slug) else slug

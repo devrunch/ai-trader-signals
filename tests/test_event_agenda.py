@@ -5,6 +5,9 @@ than eyeballed: "beat = good for the currency" is true for most releases and
 exactly backwards for unemployment.
 """
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from app.events import specs
 from app.events.agenda import build
@@ -71,3 +74,44 @@ class TestAgenda:
         # 18:00 UTC is 22:00 in Dubai -- an event he can act on, at an hour
         # that means something to him.
         assert "22:00" in build([event()])
+
+
+class TestWatchdog:
+    """The desk reporting its own failure, which is the only kind of failure
+    a single-box time-critical path can afford."""
+
+    @pytest.mark.asyncio
+    async def test_a_brief_that_never_fired_is_reported_and_fails_the_check(self):
+        from app.events import watchdog
+
+        with patch.object(watchdog, "missed", AsyncMock(return_value=["brief:USD:CPI:202609161800"])), \
+             patch("app.events.telegram.send", AsyncMock(return_value=True)) as send:
+            result = await watchdog.sweep()
+
+        # ok False is what fails this job's own Healthchecks ping, which is the
+        # second alarm: the first is the message he gets.
+        assert result["ok"] is False
+        assert result["missed"] == 1
+        assert "did not send" in send.await_args.args[0]
+
+    @pytest.mark.asyncio
+    async def test_a_clean_sweep_says_nothing_to_the_user(self):
+        from app.events import watchdog
+
+        with patch.object(watchdog, "missed", AsyncMock(return_value=[])), \
+             patch("app.events.telegram.send", AsyncMock()) as send:
+            result = await watchdog.sweep()
+
+        assert result == {"ok": True, "missed": 0}
+        send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_sweep_that_cannot_run_is_a_failure_not_a_clean_bill(self):
+        # Redis down must not read as "every brief fired".
+        from app.events import watchdog
+
+        with patch.object(watchdog, "missed", AsyncMock(side_effect=OSError("redis gone"))):
+            result = await watchdog.sweep()
+
+        assert result["ok"] is False
+        assert "OSError" in result["error"]

@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 
 from apscheduler.triggers.date import DateTrigger
 
+from app.events import watchdog
 from app.events.calendar import CalendarEvent, Impact
 
 logger = logging.getLogger(__name__)
@@ -40,7 +41,7 @@ def job_id(event: CalendarEvent) -> str:
     return f"brief:{event.currency}:{event.title}:{event.when:%Y%m%d%H%M}"
 
 
-def arm(events: list[CalendarEvent], *, now: datetime | None = None) -> list[str]:
+async def arm(events: list[CalendarEvent], *, now: datetime | None = None) -> list[str]:
     """Book a brief for every high-impact event far enough out. Returns the
     ids armed, so the caller can report a number rather than a shrug."""
     if _scheduler is None:
@@ -66,5 +67,6 @@ def arm(events: list[CalendarEvent], *, now: datetime | None = None) -> list[str
             kwargs={"currency": event.currency, "title": event.title,
                     "when_iso": event.when.isoformat()},
         )
+        await watchdog.record_armed(job_id(event), fire_at.timestamp())
         armed.append(job_id(event))
     return armed

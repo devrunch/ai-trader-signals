@@ -14,11 +14,12 @@ import logging
 from datetime import UTC, datetime
 
 from app.events import brief as brief_mod
-from app.events import history, reaction, telegram, watcher
+from app.events import history, reaction, telegram, watchdog, watcher
 from app.events.agenda import WATCHED_CURRENCIES, build
 from app.events.calendar import CalendarEvent, Impact, fetch_week, upcoming
 from app.llm.client import get_llm
 from app.market.providers.registry import market_data_router
+from app.worker import heartbeat
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 AGENDA_IMPACTS = {Impact.HIGH, Impact.MEDIUM}
 
 
+@heartbeat.monitored("event-agenda")
 async def run_agenda() -> dict:
     events = await fetch_week()
     if events is None:
@@ -43,12 +45,13 @@ async def run_agenda() -> dict:
     sent = await telegram.send(message)
     # Arming happens whether or not the push landed: a delivery failure must
     # not also cost him every brief for the rest of the week.
-    armed = watcher.arm(relevant)
+    armed = await watcher.arm(relevant)
     logger.info("Agenda: %d events (%d high), sent=%s, armed=%d", len(relevant),
                 sum(1 for e in relevant if e.impact is Impact.HIGH), sent, len(armed))
     return {"ok": sent, "events": len(relevant), "sent": sent, "armed": len(armed)}
 
 
+@heartbeat.monitored("event-brief")
 async def send_event_brief(currency: str, title: str, when_iso: str) -> dict:
     """One release, about two hours out: spec, measured reaction, situation.
 
@@ -83,5 +86,14 @@ async def send_event_brief(currency: str, title: str, when_iso: str) -> dict:
     sent = await telegram.send(message)
     logger.info("Brief for %s sent=%s (sample=%s, situation=%s)",
                 event.key, sent, getattr(stats, "sample", None), bool(situation))
+    # Recorded whether or not it sent: the watchdog asks whether the job ran,
+    # and a delivery failure is a different fault from a job that never woke.
+    await watchdog.record_fired(watcher.job_id(event), "sent" if sent else "send_failed")
     return {"ok": sent, "event": event.key, "sample": getattr(stats, "sample", 0),
             "situation": bool(situation), "sent": sent}
+
+
+@heartbeat.monitored("event-watchdog")
+async def run_watchdog() -> dict:
+    """Daily: did every brief we promised actually fire? See watchdog.py."""
+    return await watchdog.sweep()
