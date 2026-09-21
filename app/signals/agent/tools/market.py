@@ -30,16 +30,22 @@ async def get_candles(ctx: ToolContext, args: dict) -> Any:
         return {"error": f"No {interval} data available"}
 
     tail = df.tail(count)
+    # A venue that publishes no volume used to get `"volume": 0` on every row —
+    # a fabricated number, repeated once per candle, that the model could read
+    # as "nobody traded this hour". The key is dropped instead, and said once.
+    has_volume = ind_mod.has_volume(df)
     out: dict[str, Any] = {
         "symbol": ctx.resolve(args),
         "interval": interval,
         "candles": [
             {"time": str(i), "open": round(float(r.open), 2), "high": round(float(r.high), 2),
              "low": round(float(r.low), 2), "close": round(float(r.close), 2),
-             "volume": int(r.volume) if pd.notna(r.volume) else 0}
+             **({"volume": int(r.volume)} if has_volume and pd.notna(r.volume) else {})}
             for i, r in tail.iterrows()
         ],
     }
+    if not has_volume:
+        out["volume"] = "not published for this symbol"
 
     if asked > count:
         # The model asked for a longer window, so answer the question it was
@@ -127,14 +133,19 @@ async def read_chart(ctx: ToolContext, args: dict) -> Any:
     # Either half may legitimately fail — levels need fewer bars than indicators
     # do — so a partial answer is returned rather than nothing.
     out: dict[str, Any] = {"symbol": ctx.resolve(args), "interval": interval}
+    # Both halves carry the last price, and the indicator half carries it twice
+    # (`ltp` and `last_price`). Three copies of one number is three chances for
+    # the model to treat them as three facts; it is hoisted once instead.
+    _DUPES = ("symbol", "interval", "last_price", "ltp")
     if isinstance(indicators, dict) and "error" not in indicators:
-        out["indicators"] = {k: v for k, v in indicators.items()
-                             if k not in ("symbol", "interval")}
+        out["last_price"] = indicators.get("last_price")
+        out["indicators"] = {k: v for k, v in indicators.items() if k not in _DUPES}
     else:
         out["indicators_error"] = (indicators or {}).get("error")
 
     if isinstance(levels, dict) and "error" not in levels:
-        out["levels"] = {k: v for k, v in levels.items() if k not in ("symbol",)}
+        out.setdefault("last_price", levels.get("last_price"))
+        out["levels"] = {k: v for k, v in levels.items() if k not in _DUPES}
     else:
         out["levels_error"] = (levels or {}).get("error")
 

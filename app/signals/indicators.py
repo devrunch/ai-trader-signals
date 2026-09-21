@@ -76,6 +76,13 @@ def _volume(df: pd.DataFrame) -> "pd.Series | None":
     return v
 
 
+def has_volume(df: pd.DataFrame) -> bool:
+    """Whether this market publishes volume at all. Callers outside the
+    catalogue need the same answer, so they ask here rather than re-deriving
+    it and reaching a different one."""
+    return _volume(df) is not None
+
+
 def _build_catalogue() -> dict[str, tuple[Callable, str]]:
     # Deferred purely because pandas_ta is slow to import — NOT to break a
     # cycle. There is no import cycle anywhere in this package. The catalogue

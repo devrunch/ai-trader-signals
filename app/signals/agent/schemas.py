@@ -23,7 +23,6 @@ INDICATOR_NAMES = [
     "sma", "stochastic", "stochrsi", "supertrend", "tsi", "ultimate_oscillator",
     "volume", "vwap", "williams_r",
 ]
-_ALL = ", ".join(INDICATOR_NAMES)
 
 TOOL_SCHEMAS: list[dict] = [
     {
@@ -42,10 +41,9 @@ TOOL_SCHEMAS: list[dict] = [
                         "type": "array", "items": {"type": "string", "enum": INDICATOR_NAMES},
                         "description": (
                             "OMIT THIS. Omitting computes all " + str(len(INDICATOR_NAMES)) +
-                            " indicators (" + _ALL + ") for the same cost as a handful. "
-                            "Pass names only when the user asked about specific indicators; "
-                            "choosing a subset yourself means reasoning from the ones you "
-                            "happened to think of rather than from everything the chart says."
+                            " for the same cost as a handful. Name a subset only when the "
+                            "user asked about specific indicators; picking your own means "
+                            "reading the ones you thought of, not what the chart says."
                         ),
                     },
                     "interval": {"type": "string", "enum": ["1m", "5m", "15m", "1h", "1d"]},
@@ -77,7 +75,7 @@ TOOL_SCHEMAS: list[dict] = [
             "description": (
                 "Compute technical indicators for a symbol. Prefer read_chart, which returns "
                 "these plus levels in one call. Omitting 'names' computes all " +
-                str(len(INDICATOR_NAMES)) + ": " + _ALL + "."
+                str(len(INDICATOR_NAMES)) + "."
             ),
             "parameters": {
                 "type": "object",

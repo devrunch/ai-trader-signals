@@ -223,3 +223,59 @@ async def test_the_summary_describes_the_window_that_was_asked_for(trending_fram
     r = out["range"]
     assert r["low"] <= r["close"] <= r["high"]
     assert isinstance(r["change_pct"], float)
+
+
+# ---------------------------------------------------------------------------
+# Data the model pays for on every round, and should not
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_candles_omit_volume_for_a_market_that_publishes_none(trending_frame):
+    """Deriv publishes no forex volume, and every candle used to carry
+    `"volume": 0` — a fabricated number, repeated once per row, that reads as
+    "nobody traded this hour"."""
+    from app.signals.agent.tools.market import get_candles
+
+    frame = trending_frame.copy()
+    frame["volume"] = None
+    out = await get_candles(_ctx(frame), {"interval": "15m", "count": 10})
+
+    assert all("volume" not in c for c in out["candles"])
+    assert out["volume"] == "not published for this symbol"
+
+
+@pytest.mark.asyncio
+async def test_candles_keep_volume_when_the_market_has_it(trending_frame):
+    from app.signals.agent.tools.market import get_candles
+
+    out = await get_candles(_ctx(trending_frame), {"interval": "15m", "count": 10})
+    assert all(c["volume"] > 0 for c in out["candles"])
+    assert "volume" not in out
+
+
+@pytest.mark.asyncio
+async def test_read_chart_carries_the_last_price_once(trending_frame):
+    """It appeared three times — `indicators.ltp`, `indicators.last_price` and
+    `levels.last_price`. Three copies of one number is three chances to read
+    them as three facts."""
+    from app.signals.agent.tools.market import read_chart
+
+    out = await read_chart(_ctx(trending_frame), {})
+
+    assert out["last_price"] is not None
+    assert "last_price" not in out["indicators"] and "ltp" not in out["indicators"]
+    assert "last_price" not in out["levels"]
+
+
+def test_pattern_notes_are_defined_once_not_per_occurrence(trending_frame):
+    """The note is a constant of the pattern kind, so repeating it on every hit
+    resent the same sentence three and four times inside one result — and every
+    round after that resent it again."""
+    from app.signals.patterns import NOTES, detect_patterns
+
+    out = detect_patterns(trending_frame, lookback=40)
+
+    assert out["patterns"], "fixture produced no patterns to check"
+    assert all("note" not in p for p in out["patterns"])
+    assert set(out["glossary"]) == {p["pattern"] for p in out["patterns"]}
+    assert all(out["glossary"][name] == NOTES[name] for name in out["glossary"])
