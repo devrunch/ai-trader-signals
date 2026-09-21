@@ -13,6 +13,18 @@ Design rules (see docs/agent-roadmap/):
 """
 from __future__ import annotations
 
+# Every indicator `app.signals.indicators` can compute. Duplicated here rather
+# than imported because importing that module pulls in pandas_ta, which is slow
+# enough that the schema list would pay for it at process start; a test asserts
+# the two stay in step.
+INDICATOR_NAMES = [
+    "adx", "aroon", "atr", "bollinger", "cci", "cmf", "donchian", "ema", "hma",
+    "ichimoku", "keltner", "macd", "mfi", "obv", "price", "psar", "roc", "rsi",
+    "sma", "stochastic", "stochrsi", "supertrend", "tsi", "ultimate_oscillator",
+    "volume", "vwap", "williams_r",
+]
+_ALL = ", ".join(INDICATOR_NAMES)
+
 TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
@@ -27,8 +39,14 @@ TOOL_SCHEMAS: list[dict] = [
                 "type": "object",
                 "properties": {
                     "names": {
-                        "type": "array", "items": {"type": "string"},
-                        "description": "Indicators to compute. Omit for the default set.",
+                        "type": "array", "items": {"type": "string", "enum": INDICATOR_NAMES},
+                        "description": (
+                            "OMIT THIS. Omitting computes all " + str(len(INDICATOR_NAMES)) +
+                            " indicators (" + _ALL + ") for the same cost as a handful. "
+                            "Pass names only when the user asked about specific indicators; "
+                            "choosing a subset yourself means reasoning from the ones you "
+                            "happened to think of rather than from everything the chart says."
+                        ),
                     },
                     "interval": {"type": "string", "enum": ["1m", "5m", "15m", "1h", "1d"]},
                     "symbol": {"type": "string", "description": "Defaults to the chart symbol"},
@@ -57,16 +75,17 @@ TOOL_SCHEMAS: list[dict] = [
         "function": {
             "name": "get_indicators",
             "description": (
-                "Compute technical indicators for a symbol. Request exactly what you need by name. "
-                "Available: rsi, stochastic, stochrsi, macd, williams_r, cci, mfi, roc, tsi, "
-                "ultimate_oscillator, adx, aroon, ema, sma, hma, bollinger, keltner, donchian, "
-                "supertrend, psar, ichimoku, atr, obv, cmf, volume, vwap. "
-                "Omit 'names' for a sensible default set."
+                "Compute technical indicators for a symbol. Prefer read_chart, which returns "
+                "these plus levels in one call. Omitting 'names' computes all " +
+                str(len(INDICATOR_NAMES)) + ": " + _ALL + "."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "names": {"type": "array", "items": {"type": "string"}, "description": "Indicator names to compute"},
+                    "names": {
+                        "type": "array", "items": {"type": "string", "enum": INDICATOR_NAMES},
+                        "description": "Omit to compute all of them; naming a subset only narrows the read.",
+                    },
                     "interval": {"type": "string", "enum": ["5m", "15m", "1h", "1d"]},
                     "symbol": {"type": "string"},
                 },

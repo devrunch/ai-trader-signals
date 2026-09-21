@@ -59,6 +59,23 @@ def _absent(*keys: str) -> dict[str, None]:
     return {k: None for k in keys}
 
 
+def _volume(df: pd.DataFrame) -> "pd.Series | None":
+    """The frame's volume as numbers, or None when this market has no volume.
+
+    Forex through Deriv carries no volume at all, so the column arrives as
+    object dtype full of None. Every volume indicator then raised, and
+    `compute()` recorded mfi/obv/cmf/volume/vwap as *failed* — the same channel
+    a genuine bug uses. "This venue publishes no volume" is a fact about the
+    market, not a fault, and it must read as an absent value.
+    """
+    if "volume" not in df.columns:
+        return None
+    v = pd.to_numeric(df["volume"], errors="coerce")
+    if v.isna().all() or float(v.abs().sum()) == 0.0:
+        return None
+    return v
+
+
 def _build_catalogue() -> dict[str, tuple[Callable, str]]:
     # Deferred purely because pandas_ta is slow to import — NOT to break a
     # cycle. There is no import cycle anywhere in this package. The catalogue
@@ -79,8 +96,21 @@ def _build_catalogue() -> dict[str, tuple[Callable, str]]:
         if r is None: return _absent("macd", "macd_hist", "macd_signal")
         return {"macd": _last(r.iloc[:, 0]), "macd_hist": _last(r.iloc[:, 1]), "macd_signal": _last(r.iloc[:, 2])}
     def willr(df):      return {"williams_r": _last(ta.willr(df["high"], df["low"], df["close"]))}
-    def cci(df):        return {"cci": _last(ta.cci(df["high"], df["low"], df["close"]))}
-    def mfi(df):        return {"mfi": _last(ta.mfi(df["high"], df["low"], df["close"], df["volume"]))}
+    def cci(df):
+        # Computed here rather than via ta.cci: pandas_ta's CCI divides by a
+        # mean absolute deviation it gets ~1000x too small on pandas >= 2
+        # (Series.mad was removed and its fallback is wrong), so it reported
+        # gold at -49386 where CCI was -53.94. An indicator bounded near +/-300
+        # in every textbook returning five figures is not a reading the model
+        # can sanity-check, and it was being fed to it as fact.
+        length = 20
+        tp = (df["high"] + df["low"] + df["close"]) / 3
+        mad = tp.rolling(length).apply(lambda x: abs(x - x.mean()).mean(), raw=True)
+        return {"cci": _last((tp - tp.rolling(length).mean()) / (0.015 * mad.replace(0, float("nan"))))}
+    def mfi(df):
+        v = _volume(df)
+        if v is None: return _absent("mfi")
+        return {"mfi": _last(ta.mfi(df["high"], df["low"], df["close"], v))}
     def roc(df):        return {"roc": _last(ta.roc(df["close"]))}
     def tsi(df):
         r = ta.tsi(df["close"])
@@ -134,10 +164,17 @@ def _build_catalogue() -> dict[str, tuple[Callable, str]]:
         return {"tenkan": _last(vis["ITS_9"]), "kijun": _last(vis["IKS_26"]),
                 "senkou_a": _last(vis["ISA_9"]), "senkou_b": _last(vis["ISB_26"])}
     def atr(df):        return {"atr": _last(ta.atr(df["high"], df["low"], df["close"], length=14))}
-    def obv(df):        return {"obv": _last(ta.obv(df["close"], df["volume"]))}
-    def cmf(df):        return {"cmf": _last(ta.cmf(df["high"], df["low"], df["close"], df["volume"]))}
+    def obv(df):
+        v = _volume(df)
+        if v is None: return _absent("obv")
+        return {"obv": _last(ta.obv(df["close"], v))}
+    def cmf(df):
+        v = _volume(df)
+        if v is None: return _absent("cmf")
+        return {"cmf": _last(ta.cmf(df["high"], df["low"], df["close"], v))}
     def volume_stats(df):
-        v = df["volume"]
+        v = _volume(df)
+        if v is None: return _absent("volume", "volume_avg20", "volume_ratio")
         avg = float(v.tail(20).mean())
         cur = float(v.iloc[-1])
         return {"volume": int(cur), "volume_avg20": int(avg),
@@ -154,14 +191,17 @@ def _build_catalogue() -> dict[str, tuple[Callable, str]]:
         # comment above condemns, and it was then fed to the LLM prompt as fact
         # with no log line. A missing VWAP is handled everywhere downstream; a
         # confidently wrong one is not.
+        vol = _volume(df)
+        if vol is None:
+            return {"vwap": None}
         typical = (df["high"] + df["low"] + df["close"]) / 3
-        pv = typical * df["volume"]
+        pv = typical * vol
         try:
             session = pd.Series(df.index, index=df.index).dt.date
         except (AttributeError, TypeError, ValueError) as e:
             logger.warning("VWAP unavailable — index is not datetime-like (%s)", e)
             return {"vwap": None}
-        series = pv.groupby(session).cumsum() / df["volume"].groupby(session).cumsum()
+        series = pv.groupby(session).cumsum() / vol.groupby(session).cumsum()
         return {"vwap": _last(series)}
     def price(df):
         # Not an indicator, but every consumer of this dict needs the last
@@ -217,12 +257,18 @@ def available_indicators() -> list[str]:
 # to one list rather than repeating it.
 SIGNAL_SET = ["price", "rsi", "macd", "ema", "adx", "atr", "supertrend", "vwap"]
 
-DEFAULT_SET = ["rsi", "macd", "ema", "adx", "atr", "supertrend", "vwap", "volume"]
-
 
 def compute(df: pd.DataFrame, names: list[str] | None = None) -> Indicators:
-    """Compute a requested subset of indicators. Unknown names are reported, not
-    silently ignored, so the model learns what it may ask for.
+    """Compute indicators by name; omitting `names` computes the whole
+    catalogue. Unknown names are reported, not silently ignored, so the model
+    learns what it may ask for.
+
+    The default used to be an eight-indicator shortlist. That made the agent's
+    read depend on which names it happened to pick, and it picked from memory
+    rather than from the catalogue — a live turn asked for rsi/macd/bollinger/
+    ema/supertrend and never saw the other twenty-two. Computing all of them
+    warm costs ~120ms and ~220 tokens, which buys nothing worth the selection
+    bias.
 
     A group that raises is recorded in `_failed` rather than being folded into
     the same "value is None" channel as an indicator that simply lacks warm-up
@@ -232,7 +278,7 @@ def compute(df: pd.DataFrame, names: list[str] | None = None) -> Indicators:
     """
     cat = catalogue()
     if not names:
-        names = list(DEFAULT_SET)
+        names = available_indicators()
 
     out: dict = {}
     unknown: list[str] = []

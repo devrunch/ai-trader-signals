@@ -96,3 +96,84 @@ def test_bullish_engulfing_detected():
 def test_pattern_result_always_carries_the_weak_signal_caveat():
     res = detect_patterns(make_bars([(100, 101, 99, 100)] * 30))
     assert "weak signals in isolation" in res["note"]
+
+
+# ---------------------------------------------------------------------------
+# Coverage: the agent must read every indicator, not the ones it thought of
+# ---------------------------------------------------------------------------
+
+def test_omitting_names_computes_the_whole_catalogue(trending_frame):
+    """A live turn asked for five of twenty-seven and reasoned from those. The
+    default is now everything, because the model picking the subset means the
+    read depends on what it happened to remember."""
+    out = ind.compute(trending_frame)
+    assert out.get("_unknown_requested") is None
+    for key in ("rsi", "cci", "aroon_up", "tsi", "ultimate_osc", "psar",
+                "kc_upper", "dc_upper", "hma", "stochrsi_k", "williams_r"):
+        assert key in out, f"{key} missing from the default read"
+
+
+def test_schema_indicator_list_matches_the_catalogue():
+    """The schema hardcodes the names to avoid importing pandas_ta at start-up.
+    Hardcoded lists drift; this is the guard."""
+    from app.signals.agent.schemas import INDICATOR_NAMES
+    assert sorted(INDICATOR_NAMES) == ind.available_indicators()
+
+
+# ---------------------------------------------------------------------------
+# Markets with no volume
+# ---------------------------------------------------------------------------
+
+def _no_volume(frame):
+    frame = frame.copy()
+    frame["volume"] = None          # forex through Deriv arrives exactly like this
+    return frame
+
+
+def test_a_market_without_volume_reports_absence_not_failure(trending_frame):
+    """Deriv publishes no forex volume, so the column is object dtype full of
+    None. Every volume indicator used to raise and land in `_failed` — the same
+    channel a real bug uses — which also crashed nothing but hid the cause."""
+    out = ind.compute(_no_volume(trending_frame))
+    assert out.get("_failed") is None
+    for key in ("mfi", "obv", "cmf", "volume", "volume_ratio", "vwap"):
+        assert key in out and out[key] is None, f"{key} should be an absent value"
+
+
+def test_all_zero_volume_counts_as_no_volume(trending_frame):
+    frame = trending_frame.copy()
+    frame["volume"] = 0
+    out = ind.compute(frame, ["obv", "vwap", "volume"])
+    assert out["obv"] is None and out["vwap"] is None and out["volume"] is None
+
+
+def test_volume_indicators_still_compute_when_volume_is_real(trending_frame):
+    out = ind.compute(trending_frame, ["obv", "volume", "vwap"])
+    assert out["obv"] is not None and out["volume"] is not None and out["vwap"] is not None
+
+
+# ---------------------------------------------------------------------------
+# CCI
+# ---------------------------------------------------------------------------
+
+def test_cci_stays_in_a_readable_range(trending_frame):
+    """pandas_ta's CCI divides by a mean absolute deviation it gets ~1000x too
+    small on pandas >= 2, and reported gold at -49386 where CCI was -53.94. A
+    five-figure CCI is not something the model can sanity-check."""
+    cci = ind.compute(trending_frame, ["cci"])["cci"]
+    assert cci is not None
+    assert abs(cci) < 1000, f"CCI {cci} is outside any range this indicator takes"
+
+
+def test_cci_matches_its_definition(bars):
+    rng = [(100 + i, 101 + i, 99 + i, 100.5 + i) for i in range(40)]
+    frame = bars(rng)
+    tp = (frame["high"] + frame["low"] + frame["close"]) / 3
+    mad = tp.rolling(20).apply(lambda x: abs(x - x.mean()).mean(), raw=True)
+    expected = float(((tp - tp.rolling(20).mean()) / (0.015 * mad)).iloc[-1])
+    assert ind.compute(frame, ["cci"])["cci"] == pytest.approx(round(expected, 4), rel=1e-3)
+
+
+def test_cci_is_none_on_a_flat_market_rather_than_infinite(bars):
+    """Zero deviation means the denominator is zero. Infinity is not a reading."""
+    assert ind.compute(bars([(100, 100, 100, 100)] * 40), ["cci"])["cci"] is None
