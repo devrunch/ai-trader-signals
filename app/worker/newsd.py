@@ -33,6 +33,11 @@ SCHEDULE: dict[str, tuple[str, dict]] = {
     # After the day's briefs have all had their chance to fire, and before
     # tomorrow's are armed: did anything we promised go missing?
     "event-watchdog": ("app.events.job:run_watchdog", {"minute": 30, "hour": 3}),
+    # Drains the watch queue. The button is tapped in the signals process and
+    # the report runs here, so the handover is a Redis sorted set this reads
+    # on a fixed cron rather than a job added to a scheduler that is not
+    # listening for outside writes.
+    "event-watches": ("app.events.job:run_watches", {"minute": "*/5"}),
 }
 
 # Its own keys -- see redis_jobstore's docstring.

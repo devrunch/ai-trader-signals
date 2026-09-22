@@ -42,7 +42,17 @@ def _truncate(text: str) -> str:
     return text[:MAX_MESSAGE_CHARS - 20].rstrip() + "\n_(truncated)_"
 
 
-async def send(text: str) -> bool:
+def watch_button(token: str) -> dict:
+    """The one inline keyboard this product has: watch what actually happens.
+
+    Callback data is capped at 64 bytes by Telegram, which will not hold an
+    event title — the token is a handle into `watches`, not the event itself.
+    """
+    return {"inline_keyboard": [[{"text": "Watch what happens",
+                                  "callback_data": f"w:{token}"}]]}
+
+
+async def send(text: str, buttons: dict | None = None) -> bool:
     """Push one message to every enrolled chat.
 
     Returns whether it reached at least one of them — "two of three landed" is
@@ -56,7 +66,7 @@ async def send(text: str) -> bool:
 
     delivered = 0
     for chat_id in chats:
-        if await send_to(chat_id, text):
+        if await send_to(chat_id, text, buttons):
             delivered += 1
     if delivered < len(chats):
         logger.warning("Telegram: delivered to %d of %d subscribers",
@@ -64,25 +74,28 @@ async def send(text: str) -> bool:
     return delivered > 0
 
 
-async def send_to(chat_id: str, text: str) -> bool:
+async def send_to(chat_id: str, text: str, buttons: dict | None = None) -> bool:
     """One chat. Used directly for replies, and by the fan-out above."""
     token = getattr(get_settings(), "telegram_bot_token", "")
     if not token or not chat_id:
         logger.warning("Telegram not configured -- message not delivered")
         return False
 
+    body = {"chat_id": str(chat_id), "text": _truncate(text),
+            "parse_mode": "Markdown", "disable_web_page_preview": True}
+    if buttons:
+        body["reply_markup"] = buttons
+
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             resp = await client.post(
-                API.format(token=token, method="sendMessage"),
-                json={"chat_id": str(chat_id), "text": _truncate(text),
-                      "parse_mode": "Markdown", "disable_web_page_preview": True},
+                API.format(token=token, method="sendMessage"), json=body,
             )
         if resp.status_code == 200:
             return True
 
-        body = (resp.text or "").lower()
-        if any(marker in body for marker in _GONE_MARKERS):
+        complaint = (resp.text or "").lower()
+        if any(marker in complaint for marker in _GONE_MARKERS):
             logger.info("Chat %s is gone (%s) -- unsubscribing it",
                         chat_id, resp.status_code)
             await subscribers.remove(chat_id)
@@ -94,4 +107,26 @@ async def send_to(chat_id: str, text: str) -> bool:
         return False
     except httpx.HTTPError as e:
         logger.warning("Telegram send to %s failed: %s", chat_id, e)
+        return False
+
+
+async def answer_callback(callback_id: str, text: str) -> bool:
+    """Acknowledge a button tap.
+
+    Telegram shows a spinner on the button until this is called, so skipping it
+    leaves the user looking at a control that appears stuck even when the work
+    succeeded.
+    """
+    token = getattr(get_settings(), "telegram_bot_token", "")
+    if not token or not callback_id:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.post(
+                API.format(token=token, method="answerCallbackQuery"),
+                json={"callback_query_id": callback_id, "text": text[:200]},
+            )
+        return resp.status_code == 200
+    except httpx.HTTPError as e:
+        logger.warning("Telegram callback answer failed: %s", e)
         return False

@@ -1,8 +1,9 @@
 """What the bot does with an incoming update.
 
-Pure in the sense that matters: the decision is taken from a plain dict, and
-the only I/O is the registry and the desk's own state. No HTTP client lives
-here, so every command is a table test against a fixture update.
+The decision is taken from a plain dict, so every command is a table test
+against a fixture update. The one outbound call is `answerCallbackQuery`: a
+button tap has to be acknowledged inside the handler, because Telegram spins
+the button until it is and the reply message arrives a moment later.
 
 The refusals are deliberately identical to each other. A bot whose reply
 differs between "wrong key", "rate limited" and "unknown command" tells a
@@ -17,7 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from app.config import get_settings
-from app.events import subscribers, watchdog
+from app.events import subscribers, telegram, watchdog, watches
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,9 @@ ENROLLED = (
 UNENROLLED = "Event desk off. Send /start <key> to turn it back on."
 HELP = "/status — what is armed\n/stop — turn the desk off"
 STATUS_UNAVAILABLE = "Desk state is unreadable right now. The jobs are unaffected."
+WATCH_ARMED = "Watching. You will get the real move about 35 minutes after the print."
+WATCH_EXPIRED = "That event is over."
+WATCH_DENIED = "Send /start <key> to enable."
 
 
 @dataclass(frozen=True)
@@ -48,10 +52,12 @@ class Reply:
 async def handle(update: dict) -> Reply | None:
     """One update in, at most one reply out.
 
-    None means "nothing to say" — a callback query (buttons are the next
-    piece and answering their taps now would ship half a protocol), or a
-    message with no text at all.
+    None means "nothing to say" — a message with no text, or a tap that was
+    acknowledged on the button and needs no message of its own.
     """
+    if isinstance(update.get("callback_query"), dict):
+        return await _tap(update["callback_query"])
+
     message = update.get("message") or update.get("edited_message")
     if not isinstance(message, dict):
         return None
@@ -80,6 +86,34 @@ async def handle(update: dict) -> Reply | None:
     if command == "/status":
         return Reply(chat_id, await _status())
     return Reply(chat_id, HELP)
+
+
+async def _tap(query: dict) -> Reply | None:
+    """A button press. The only button is "watch what happens".
+
+    The tap is acknowledged either way — Telegram spins the button until it
+    is, so an unacknowledged tap looks broken even when it worked.
+    """
+    chat_id = str(((query.get("message") or {}).get("chat") or {}).get("id") or "").strip()
+    data = str(query.get("data") or "")
+    callback_id = str(query.get("id") or "")
+    if not chat_id or not data.startswith("w:"):
+        await telegram.answer_callback(callback_id, "")
+        return None
+
+    if not await subscribers.contains(chat_id):
+        # Buttons live in forwardable messages, so a tap can arrive from a
+        # chat that was never enrolled.
+        await telegram.answer_callback(callback_id, WATCH_DENIED)
+        return None
+
+    event = await watches.arm(data[2:], chat_id)
+    await telegram.answer_callback(callback_id, WATCH_ARMED if event else WATCH_EXPIRED)
+    if event is None:
+        return Reply(chat_id, WATCH_EXPIRED)
+    logger.info("Chat %s is watching %s", chat_id, event.get("event_key"))
+    return Reply(chat_id, f"Watching *{event['currency']} {event['title']}*. "
+                          "You will get the realised move once the window exists.")
 
 
 async def _start(chat_id: str, key: str) -> str:

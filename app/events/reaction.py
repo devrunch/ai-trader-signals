@@ -207,3 +207,21 @@ def instances_from_history(rows: list[dict], *, limit: int = 24) -> list[Instanc
                             surprise=classify(actual, forecast)))
     out.sort(key=lambda i: i.when, reverse=True)
     return out[:limit]
+
+
+async def realised_move(symbol: str, release: datetime) -> dict | None:
+    """What one release actually did, measured once the window exists.
+
+    None means the minute bars for that window are not downloadable yet —
+    which is a "come back later", not a "nothing happened". The caller retries
+    on it, so returning zeros here would turn a late feed into a false report
+    of a flat market.
+    """
+    bars = await _window(symbol, release)
+    if not bars:
+        return None
+    moves = {"move_15m": move_after(bars, release, 15),
+             "move_30m": move_after(bars, release, 30)}
+    if all(v is None for v in moves.values()):
+        return None
+    return moves
