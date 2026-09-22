@@ -28,11 +28,17 @@ from enum import StrEnum
 from statistics import median
 
 from app.market.providers import dukascopy_bridge
+from app.market.providers.registry import market_data_router
 
 logger = logging.getLogger(__name__)
 
 # Below this a distribution is an anecdote. Reported as "too few to say"
 # rather than dressed up with a median.
+# A watch only ever asks about a release in the last few hours, and the live
+# provider pages backwards -- asking for more days is more round trips for
+# bars nothing reads.
+LIVE_WINDOW_DAYS = 1
+
 MIN_SAMPLE = 5
 
 # Minute bars either side of the release: enough before it to price the move
@@ -210,16 +216,28 @@ def instances_from_history(rows: list[dict], *, limit: int = 24) -> list[Instanc
 
 
 async def realised_move(symbol: str, release: datetime) -> dict | None:
-    """What one release actually did, measured once the window exists.
+    """What one release actually did, off the live feed.
 
-    None means the minute bars for that window are not downloadable yet —
-    which is a "come back later", not a "nothing happened". The caller retries
-    on it, so returning zeros here would turn a late feed into a false report
-    of a flat market.
+    Deliberately NOT `_window`. That reads Dukascopy, which is right for the
+    historical study — it goes back years — and useless here: measured on the
+    box, its gold minute bars run six to twelve hours behind (T-6h empty,
+    T-12h full). A watch reporting 35 minutes after a print would have found
+    nothing every single time. The live router is 0.9 minutes behind.
+
+    Returns None when the window does not reach the marks yet, which is a
+    "come back later", not a "nothing happened". Reporting zeros on a late
+    feed would turn a delay into a false report of a flat market.
     """
-    bars = await _window(symbol, release)
-    if not bars:
+    df = await market_data_router.get_historical_df(
+        symbol, "FOREX", interval="1m", days=LIVE_WINDOW_DAYS)
+    if df is None or df.empty:
         return None
+
+    # move_after owns the rule that a window must actually reach the mark being
+    # measured; reshaping into its bar dicts keeps that rule in one place.
+    bars = [{"t": int(ts.timestamp() * 1000), "o": float(row.open),
+             "h": float(row.high), "l": float(row.low), "c": float(row.close)}
+            for ts, row in df.iterrows()]
     moves = {"move_15m": move_after(bars, release, 15),
              "move_30m": move_after(bars, release, 30)}
     if all(v is None for v in moves.values()):

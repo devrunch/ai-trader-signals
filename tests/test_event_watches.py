@@ -1,9 +1,14 @@
 """Watches: the button that closes the loop on a brief.
 
 A brief predicts. A watch reports what actually happened. The tests that
-matter here are the ones about *not* reporting: a window whose minute bars are
-not downloadable yet must be retried, not rendered as a flat market, and it
-must eventually stop being retried.
+matter here are the ones about *not* reporting: a window whose minute bars have
+not arrived yet must be retried, not rendered as a flat market, and it must
+eventually stop being retried.
+
+The realised move is measured off the LIVE router, not the historical
+Dukascopy feed. Measured on the box, Dukascopy's gold minute bars run six to
+twelve hours behind; a watch reporting 35 minutes after a print would have
+found nothing, every time.
 """
 from __future__ import annotations
 
@@ -227,31 +232,63 @@ class TestTheButton:
 
 
 class TestRealisedMove:
+    """Measured off the live feed, not the historical one.
+
+    Dukascopy's gold minute bars run six to twelve hours behind on the box
+    (T-6h empty, T-12h full). A watch reporting 35 minutes after a print would
+    have found nothing, every time. These tests pin the source as much as the
+    maths.
+    """
+
+    @staticmethod
+    def _frame(minutes: int):
+        import pandas as pd
+        rows, index = [], []
+        for minute in range(-1, minutes + 1):
+            index.append(WHEN + timedelta(minutes=minute))
+            rows.append({"open": 100.0, "high": 102.0, "low": 100.0,
+                         "close": 100.0 if minute <= 0 else 100 + minute * 0.1})
+        return pd.DataFrame(rows, index=pd.DatetimeIndex(index))
+
     @pytest.mark.asyncio
-    async def test_a_window_that_is_not_downloadable_yet_reports_nothing(self):
+    async def test_it_reads_the_live_router_not_the_historical_feed(self):
+        from app.events import reaction
+        stale = AsyncMock()
+        with patch("app.events.reaction.market_data_router.get_historical_df",
+                   AsyncMock(return_value=self._frame(30))),              patch("app.events.reaction._window", stale):
+            await reaction.realised_move("XAUUSD", WHEN)
+        stale.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_an_empty_feed_reports_nothing(self):
         """Zeros here would turn a late feed into a report of a flat market."""
         from app.events import reaction
-        with patch("app.events.reaction._window", AsyncMock(return_value=None)):
+        with patch("app.events.reaction.market_data_router.get_historical_df",
+                   AsyncMock(return_value=None)):
             assert await reaction.realised_move("XAUUSD", WHEN) is None
 
     @pytest.mark.asyncio
-    async def test_bars_that_stop_short_of_the_mark_report_nothing(self):
+    async def test_bars_that_stop_short_of_the_marks_report_nothing(self):
         from app.events import reaction
-        base = WHEN.timestamp() * 1000
-        bars = [{"t": base - 60_000, "o": 100, "h": 100, "l": 100, "c": 100},
-                {"t": base + 60_000, "o": 100, "h": 101, "l": 100, "c": 101}]
-        with patch("app.events.reaction._window", AsyncMock(return_value=bars)):
+        with patch("app.events.reaction.market_data_router.get_historical_df",
+                   AsyncMock(return_value=self._frame(2))):
             assert await reaction.realised_move("XAUUSD", WHEN) is None
+
+    @pytest.mark.asyncio
+    async def test_the_fifteen_minute_mark_alone_is_still_worth_reporting(self):
+        """Half an answer beats waiting for the other half."""
+        from app.events import reaction
+        with patch("app.events.reaction.market_data_router.get_historical_df",
+                   AsyncMock(return_value=self._frame(16))):
+            moved = await reaction.realised_move("XAUUSD", WHEN)
+        assert moved["move_15m"] == pytest.approx(1.5, abs=0.01)
+        assert moved["move_30m"] is None
 
     @pytest.mark.asyncio
     async def test_a_complete_window_is_measured_at_both_marks(self):
         from app.events import reaction
-        base = WHEN.timestamp() * 1000
-        bars = [{"t": base - 60_000, "o": 100, "h": 100, "l": 100, "c": 100}]
-        for minute in range(1, 31):
-            bars.append({"t": base + minute * 60_000, "o": 100, "h": 102,
-                         "l": 100, "c": 100 + minute * 0.1})
-        with patch("app.events.reaction._window", AsyncMock(return_value=bars)):
+        with patch("app.events.reaction.market_data_router.get_historical_df",
+                   AsyncMock(return_value=self._frame(30))):
             moved = await reaction.realised_move("XAUUSD", WHEN)
         assert moved["move_15m"] == pytest.approx(1.5, abs=0.01)
         assert moved["move_30m"] == pytest.approx(3.0, abs=0.01)
