@@ -210,7 +210,14 @@ class Settings(BaseSettings):
     # The event desk's only delivery channel. Both must be set for a brief to
     # reach anyone; the job says so rather than failing silently.
     telegram_bot_token: str = ""
+    # The chat the desk delivered to before there was a registry. Now a seed:
+    # subscribers.py carries it into the set once, then the set is the truth.
     telegram_chat_id: str = ""
+    # What Telegram echoes back in X-Telegram-Bot-Api-Secret-Token. Unset means
+    # the webhook refuses everything rather than falling open.
+    telegram_webhook_secret: str = ""
+    # What a user pastes after /start to enroll. Unset means nobody can enroll.
+    telegram_invite_secret: str = ""
 
 
     # pydantic-settings defaults to extra='forbid', so any key present in .env

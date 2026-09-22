@@ -40,6 +40,7 @@ async def run_agenda() -> dict:
     if message is None:
         # A genuinely empty week, said plainly rather than pushed as content.
         logger.info("Agenda: nothing upcoming for %s", sorted(WATCHED_CURRENCIES))
+        await watchdog.record_run("agenda", "quiet week")
         return {"ok": True, "events": 0, "sent": False}
 
     sent = await telegram.send(message)
@@ -48,6 +49,9 @@ async def run_agenda() -> dict:
     armed = await watcher.arm(relevant)
     logger.info("Agenda: %d events (%d high), sent=%s, armed=%d", len(relevant),
                 sum(1 for e in relevant if e.impact is Impact.HIGH), sent, len(armed))
+    # So /status can answer "when did the desk last look", which is the
+    # question someone asks when their phone has been quiet.
+    await watchdog.record_run("agenda", f"{len(relevant)} events, {len(armed)} armed")
     return {"ok": sent, "events": len(relevant), "sent": sent, "armed": len(armed)}
 
 

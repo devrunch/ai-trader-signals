@@ -31,6 +31,7 @@ from app.market.providers.registry import market_data_router
 from app.market.router import router as market_router
 from app.market.service import get_quote
 from app.signals.pine import sandbox as pine_sandbox
+from app.events.router import router as telegram_router
 from app.signals.router import router as signals_router
 from app.worker import scheduler as job_scheduler
 
@@ -239,6 +240,9 @@ app = FastAPI(title="AI Trader Signals Service", version="0.1.0", lifespan=lifes
 
 app.include_router(signals_router, prefix="/signals", tags=["signals"])
 app.include_router(market_router, prefix="/market", tags=["market"])
+# Public through exactly one exact-path block in the Caddyfile. Nothing else
+# on this port is reachable from outside.
+app.include_router(telegram_router, prefix="/telegram", tags=["telegram"])
 
 
 @app.get("/health")
