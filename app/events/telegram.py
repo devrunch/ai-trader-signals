@@ -42,6 +42,17 @@ def _truncate(text: str) -> str:
     return text[:MAX_MESSAGE_CHARS - 20].rstrip() + "\n_(truncated)_"
 
 
+def brief_button(token: str) -> dict:
+    """The [Brief me] control on a news shock.
+
+    Separate prefix from the watch button: the two carry different tokens into
+    different stores, and one handler that guessed which from the token's shape
+    would be a bug waiting for a collision.
+    """
+    return {"inline_keyboard": [[{"text": "Brief me",
+                                  "callback_data": f"b:{token}"}]]}
+
+
 def watch_button(token: str) -> dict:
     """The one inline keyboard this product has: watch what actually happens.
 

@@ -292,3 +292,87 @@ class TestRealisedMove:
             moved = await reaction.realised_move("XAUUSD", WHEN)
         assert moved["move_15m"] == pytest.approx(1.5, abs=0.01)
         assert moved["move_30m"] == pytest.approx(3.0, abs=0.01)
+
+
+class TestBriefMeButton:
+    """The other button. Selection was free; this is the part that costs."""
+
+    @staticmethod
+    def _tap(token, chat_id=42):
+        return {"update_id": 11, "callback_query": {
+            "id": "cb9", "data": f"b:{token}",
+            "message": {"chat": {"id": chat_id}}}}
+
+    @pytest.mark.asyncio
+    async def test_a_tap_writes_the_summary_that_the_push_withheld(self):
+        r = _FakeRedis()
+        r.members.add("42")
+        r.strings["events.subscribers.seeded"] = "1"
+        r.strings["events.shock.offer:tok1"] = (
+            '{"headline": "Tariffs raised on steel", "source": "Reuters", '
+            '"url": "https://example.com/x", "symbols": ["XAUUSD"], '
+            '"sentiment": "NEGATIVE"}')
+        p = _redis(r)
+        with p[0], p[1], p[2], p[3], p[4], \
+             patch("app.events.shocks._client", return_value=r), \
+             patch("app.events.shocks.get_settings", return_value=MagicMock(redis_url="redis://fake")), \
+             patch("app.events.bot.telegram.answer_callback", AsyncMock(return_value=True)), \
+             patch("app.events.bot._gold_price", AsyncMock(return_value=4350.0)), \
+             patch("app.events.shock_brief.write", AsyncMock(return_value="If it escalates: gold bid.")):
+            reply = await bot.handle(self._tap("tok1"))
+        assert "Tariffs raised on steel" in reply.text
+        assert "If it escalates" in reply.text
+
+    @pytest.mark.asyncio
+    async def test_a_model_outage_costs_the_paragraph_not_the_reply(self):
+        """The headline already landed. Silence here would read as the bot
+        being broken rather than the model being down."""
+        from app.events import shock_brief
+
+        r = _FakeRedis()
+        r.members.add("42")
+        r.strings["events.subscribers.seeded"] = "1"
+        r.strings["events.shock.offer:tok2"] = '{"headline": "Sanctions widened"}'
+        p = _redis(r)
+        with p[0], p[1], p[2], p[3], p[4], \
+             patch("app.events.shocks._client", return_value=r), \
+             patch("app.events.shocks.get_settings", return_value=MagicMock(redis_url="redis://fake")), \
+             patch("app.events.bot.telegram.answer_callback", AsyncMock(return_value=True)), \
+             patch("app.events.bot._gold_price", AsyncMock(return_value=None)), \
+             patch("app.events.shock_brief.write", AsyncMock(return_value=None)):
+            reply = await bot.handle(self._tap("tok2"))
+        assert reply.text == shock_brief.UNAVAILABLE
+
+    @pytest.mark.asyncio
+    async def test_the_tap_is_acknowledged_before_the_model_is_called(self):
+        """The write-up takes seconds and Telegram spins the button until it
+        hears back; acknowledging afterwards means a stuck control throughout."""
+        order = []
+        r = _FakeRedis()
+        r.members.add("42")
+        r.strings["events.subscribers.seeded"] = "1"
+        r.strings["events.shock.offer:tok3"] = '{"headline": "Embargo extended"}'
+        p = _redis(r)
+        with p[0], p[1], p[2], p[3], p[4], \
+             patch("app.events.shocks._client", return_value=r), \
+             patch("app.events.shocks.get_settings", return_value=MagicMock(redis_url="redis://fake")), \
+             patch("app.events.bot.telegram.answer_callback",
+                   AsyncMock(side_effect=lambda *a: order.append("ack"))), \
+             patch("app.events.bot._gold_price", AsyncMock(return_value=None)), \
+             patch("app.events.shock_brief.write",
+                   AsyncMock(side_effect=lambda *a: order.append("model") or "text")):
+            await bot.handle(self._tap("tok3"))
+        assert order == ["ack", "model"]
+
+    @pytest.mark.asyncio
+    async def test_a_tap_from_a_stranger_never_reaches_the_model(self):
+        """Otherwise the button is a way for anyone holding a forwarded
+        message to spend the account's tokens."""
+        r = _FakeRedis()
+        r.strings["events.subscribers.seeded"] = "1"
+        p = _redis(r)
+        with p[0], p[1], p[2], p[3], p[4], \
+             patch("app.events.bot.telegram.answer_callback", AsyncMock(return_value=True)), \
+             patch("app.events.shock_brief.write",
+                   AsyncMock(side_effect=AssertionError("stranger reached the model"))):
+            assert await bot.handle(self._tap("tok1", chat_id=999)) is None

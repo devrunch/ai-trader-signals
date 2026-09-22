@@ -27,15 +27,51 @@ def run_news_analysis():
     use."""
     from app.market import news
 
-    async def run() -> tuple[dict, bool]:
+    async def run() -> tuple[dict, bool, int]:
         result = await news.get_market_news_result(page_size=25)
-        return result, await news.publish(result)
+        published = await news.publish(result)
+        # After publishing, so a Telegram outage cannot cost the terminal its
+        # feed -- the web panel reads the published result either way.
+        pushed = await push_shocks(result.get("articles") or [])
+        return result, published, pushed
 
     try:
-        result, ok = run_async(run())
-        logger.info("News analysis done: %d articles, degraded=%s, published=%s",
-                    result["count"], result["degraded"], ok)
-        return {"count": result["count"], "degraded": result["degraded"], "published": ok}
+        result, ok, pushed = run_async(run())
+        logger.info("News analysis done: %d articles, degraded=%s, published=%s, pushed=%d",
+                    result["count"], result["degraded"], ok, pushed)
+        return {"count": result["count"], "degraded": result["degraded"],
+                "published": ok, "pushed": pushed}
     except Exception:
         logger.exception("News analysis failed")
         return {"error": True}
+
+
+async def push_shocks(articles: list[dict]) -> int:
+    """Send the headlines that move this desk, and nothing else.
+
+    A sink on the pipeline above rather than a pipeline of its own: selection
+    reads the sentiment and impact analysis that run already paid for, so the
+    only new cost is the Telegram call. The write-up costs a model call and is
+    therefore behind the button, not in this message.
+
+    Never raises. A push problem must not fail the news run that produced the
+    articles, which the terminal reads from whether or not Telegram is up.
+    """
+    from app.events import shocks, telegram
+
+    try:
+        found = [s for s in (shocks.select(a) for a in articles) if s is not None]
+        fresh = await shocks.unseen(shocks.rank(found))
+        sent = 0
+        for shock in fresh[:shocks.MAX_PER_RUN]:
+            token = await shocks.offer(shock)
+            if await telegram.send(shocks.render(shock),
+                                   buttons=telegram.brief_button(token)):
+                sent += 1
+        if found:
+            logger.info("Shocks: %d matched, %d new, %d sent",
+                        len(found), len(fresh), sent)
+        return sent
+    except Exception:
+        logger.exception("Could not push news shocks")
+        return 0

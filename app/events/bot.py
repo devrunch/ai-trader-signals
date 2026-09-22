@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from app.config import get_settings
-from app.events import subscribers, telegram, watchdog, watches
+from app.events import shocks, subscribers, telegram, watchdog, watches
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,8 @@ STATUS_UNAVAILABLE = "Desk state is unreadable right now. The jobs are unaffecte
 WATCH_ARMED = "Watching. You will get the real move about 35 minutes after the print."
 WATCH_EXPIRED = "That event is over."
 WATCH_DENIED = "Send /start <key> to enable."
+BRIEF_WORKING = "Writing it up..."
+BRIEF_EXPIRED = "That story is no longer on the desk."
 
 
 @dataclass(frozen=True)
@@ -89,7 +91,11 @@ async def handle(update: dict) -> Reply | None:
 
 
 async def _tap(query: dict) -> Reply | None:
-    """A button press. The only button is "watch what happens".
+    """A button press. Two exist: watch an event, brief a news shock.
+
+    The prefix picks the handler rather than the token's shape. They are
+    different lengths today, and a handler that inferred one from the other
+    would be a bug waiting for the day they collide.
 
     The tap is acknowledged either way — Telegram spins the button until it
     is, so an unacknowledged tap looks broken even when it worked.
@@ -97,7 +103,8 @@ async def _tap(query: dict) -> Reply | None:
     chat_id = str(((query.get("message") or {}).get("chat") or {}).get("id") or "").strip()
     data = str(query.get("data") or "")
     callback_id = str(query.get("id") or "")
-    if not chat_id or not data.startswith("w:"):
+    prefix, _, token = data.partition(":")
+    if not chat_id or prefix not in ("w", "b") or not token:
         await telegram.answer_callback(callback_id, "")
         return None
 
@@ -107,13 +114,54 @@ async def _tap(query: dict) -> Reply | None:
         await telegram.answer_callback(callback_id, WATCH_DENIED)
         return None
 
-    event = await watches.arm(data[2:], chat_id)
+    if prefix == "b":
+        return await _brief_me(chat_id, callback_id, token)
+
+    event = await watches.arm(token, chat_id)
     await telegram.answer_callback(callback_id, WATCH_ARMED if event else WATCH_EXPIRED)
     if event is None:
         return Reply(chat_id, WATCH_EXPIRED)
     logger.info("Chat %s is watching %s", chat_id, event.get("event_key"))
     return Reply(chat_id, f"Watching *{event['currency']} {event['title']}*. "
                           "You will get the realised move once the window exists.")
+
+
+async def _brief_me(chat_id: str, callback_id: str, token: str) -> Reply | None:
+    """Summarise one news shock, on request and only on request.
+
+    Acknowledged before the model is called: the write-up takes seconds and
+    Telegram spins the button until it hears back, so the user would otherwise
+    watch a stuck control for the whole call.
+    """
+    offer = await shocks.offered(token)
+    if offer is None:
+        await telegram.answer_callback(callback_id, BRIEF_EXPIRED)
+        return Reply(chat_id, BRIEF_EXPIRED)
+
+    await telegram.answer_callback(callback_id, BRIEF_WORKING)
+    # Imported here, not at module scope: this module is loaded by the webhook
+    # process on every update, and the LLM client pulls in a stack that has no
+    # business being on that path unless somebody actually taps the button.
+    from app.events import shock_brief
+    from app.llm.client import get_llm
+
+    text = await shock_brief.write(get_llm(), offer, await _gold_price())
+    if text is None:
+        return Reply(chat_id, shock_brief.UNAVAILABLE)
+    logger.info("Wrote a shock brief for chat %s", chat_id)
+    return Reply(chat_id, f"*{offer.get('headline', '')}*\n\n{text}")
+
+
+async def _gold_price() -> float | None:
+    """Context for the write-up, never a reason to withhold it."""
+    try:
+        from app.events.brief import GOLD
+        from app.market.providers.registry import market_data_router
+        quote = await market_data_router.get_quote(GOLD, "FOREX")
+        return (quote or {}).get("ltp")
+    except Exception:
+        logger.warning("Could not price gold for a shock brief", exc_info=True)
+        return None
 
 
 async def _start(chat_id: str, key: str) -> str:
