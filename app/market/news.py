@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from datetime import UTC, datetime
 
 import httpx
@@ -225,15 +226,53 @@ async def _fetch_newsapi_safe(query: str, page_size: int) -> list[dict] | None:
         return None
 
 
+# Syndicated filings and ratings boilerplate. Real articles, and genuinely
+# worthless to this desk: one fund's 13F disclosure moves nothing and the wires
+# publish hundreds a day. Alpha Vantage carries them in volume and is also the
+# freshest source, so before this they sorted to the top and evicted every
+# macro headline from the page -- measured live, 25 of 25 articles were this
+# while NewsAPI was simultaneously returning Hormuz, Ukraine and Middle East
+# diesel.
+_FILING_NOISE = re.compile(
+    r"\b(?:"
+    r"shares? (?:in|of) .{1,60} (?:acquired|sold|purchased) by"
+    r"|(?:sells?|sold|buys?|bought|acquires?|purchases?) [\d,.]+ shares? (?:in|of)"
+    r"|(?:acquires?|takes?|buys?|sells?|trims?|boosts?|lowers?|raises?) "
+    r"(?:a |an |its )?(?:new )?(?:stake|position|holdings?) in"
+    r"|(?:invests?|purchases?) \$[\d.,]+ (?:million|billion) in"
+    r"|(?:has|takes) (?:a )?\$[\d.,]+ (?:million|billion) (?:stake|position)"
+    r"|given (?:a )?(?:consensus|average) rating"
+    r"|receives? (?:an? )?(?:average|consensus) rating"
+    r"|(?:price target|pt) (?:raised|lowered|set) (?:to|at)"
+    r"|short interest (?:up|down|update)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# No single source may take more than this share of the page. Ranking purely
+# by recency hands the page to whichever source is freshest AND chattiest,
+# which is not the same as most useful.
+MAX_SHARE_PER_SOURCE = 0.5
+
+
+def _is_filing_noise(article: dict) -> bool:
+    return bool(_FILING_NOISE.search(article.get("title") or ""))
+
+
 def _merge_sources(sources: list[list[dict]], page_size: int) -> list[dict]:
     """Newest first across every source, deduped, trimmed to page_size.
 
-    Sorted on the real publish timestamp rather than interleaving by
-    source: the three sources run at very different lags (yfinance ~1h,
+    Sorted on the real publish timestamp rather than interleaving by source:
+    the sources run at very different lags (Alpha Vantage ~1.4h, yfinance ~1h,
     newsdata 12h, NewsAPI 24h), so a plain interleave would put day-old
-    articles above hour-old ones on the page. An unparseable or missing
-    timestamp sorts last rather than being dropped -- a real headline is
-    worth more than its position.
+    articles above hour-old ones. An unparseable or missing timestamp sorts
+    last rather than being dropped -- a real headline is worth more than its
+    position.
+
+    Two things temper that ordering, both learned from the live feed: filings
+    boilerplate is dropped outright, and no one source may take more than half
+    the page. Recency alone gave the page to whichever source published most,
+    which is the opposite of an edit.
     """
     def sort_key(a: dict) -> tuple[int, float]:
         raw = a.get("publishedAt") or ""
@@ -242,9 +281,31 @@ def _merge_sources(sources: list[list[dict]], page_size: int) -> list[dict]:
         except (ValueError, AttributeError, TypeError):
             return (1, 0.0)
 
-    merged = _dedupe_articles([a for source in sources for a in source])
+    kept = [a for source in sources for a in source if not _is_filing_noise(a)]
+    # A source that is nothing but boilerplate would otherwise return a short
+    # page, which is worse than a page carrying some of it.
+    if not kept:
+        kept = [a for source in sources for a in source]
+
+    merged = _dedupe_articles(kept)
     merged.sort(key=sort_key)
-    return merged[:page_size]
+
+    cap = max(1, int(page_size * MAX_SHARE_PER_SOURCE))
+    page, taken, overflow = [], {}, []
+    for item in merged:
+        name = ((item.get("source") or {}).get("name") or "").lower()
+        if taken.get(name, 0) >= cap:
+            overflow.append(item)
+            continue
+        taken[name] = taken.get(name, 0) + 1
+        page.append(item)
+        if len(page) == page_size:
+            return page
+
+    # The cap shapes the page; it must never shrink it. What it held back
+    # fills any room left, still newest first.
+    page.extend(overflow[:page_size - len(page)])
+    return page
 
 
 # newsdata.io. Worth a third source specifically because Reuters, Bloomberg

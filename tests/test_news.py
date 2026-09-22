@@ -735,3 +735,81 @@ class TestImpactCacheAcrossRuns:
         assert ok is True
         assert analyses == [{"sentiment": "NEUTRAL", "impacts": []}]
         assert len(llm.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# What gets onto the page
+# ---------------------------------------------------------------------------
+
+class TestFilingNoise:
+    """Every string here was on the live feed, in one 25-article page, while
+    NewsAPI was simultaneously returning Hormuz, Ukraine and Middle East
+    diesel. The page had no macro on it at all."""
+
+    @pytest.mark.parametrize("title", [
+        "266,178 Shares in Huntington Bancshares Incorporated $HBAN Acquired by Nykredit A S",
+        "Nykredit A S Invests $4.62 Million in Texas Pacific Land Corporation $TPL",
+        "Nykredit A S Takes Position in lululemon athletica inc. $LULU",
+        "Engineers Gate Manager LP Sells 54,469 Shares of Leidos Holdings, Inc. $LDOS",
+        "Bank of America Corp DE Takes New Stake in Murphy Oil Corporation $MUR",
+        "Bank of America Corp DE Has $40.41 Million Stake in Ambev S.A. $ABEV",
+        "XPO, Inc. (NYSE:XPO) Given Consensus Rating of 'Moderate Buy' by Brokerages",
+        "Global Payments Inc. (NYSE:GPN) Receives Average Rating of 'Hold' from Analysts",
+    ])
+    def test_a_filing_or_a_rating_is_not_news(self, title):
+        from app.market.news import _is_filing_noise
+        assert _is_filing_noise({"title": title})
+
+    @pytest.mark.parametrize("title", [
+        "French diesel prices hit record EUR2.40 per litre amid Middle East tensions",
+        "Pakistan Secures Second Qatari LNG Cargo Through Hormuz After Iran Deal",
+        "Russia's pro-Putin party set to win election as Ukraine exposes war's reach",
+        "OPEC+ agrees a surprise output cut",
+        "Gold rises as the Fed signals a rate cut",
+        "Nucor's stronger steel prices fail to offset rising costs",
+    ])
+    def test_real_news_survives(self, title):
+        from app.market.news import _is_filing_noise
+        assert not _is_filing_noise({"title": title})
+
+
+class TestSourceBalance:
+    @staticmethod
+    def _from(name, n, hour=12):
+        return [{"title": f"{name} story {i}", "url": f"https://{name}/{i}",
+                 "source": {"name": name},
+                 "publishedAt": f"2026-09-22T{hour:02d}:{i:02d}:00Z"}
+                for i in range(n)]
+
+    def test_one_chatty_source_cannot_take_the_whole_page(self):
+        """Alpha Vantage is the freshest source AND the noisiest. Sorting by
+        recency alone handed it all 25 slots."""
+        from app.market.news import _merge_sources
+
+        page = _merge_sources([self._from("loud", 25, hour=12),
+                               self._from("quiet", 25, hour=11)], 10)
+        assert sum(1 for a in page if a["source"]["name"] == "loud") == 5
+        assert sum(1 for a in page if a["source"]["name"] == "quiet") == 5
+
+    def test_the_cap_shapes_the_page_and_never_shrinks_it(self):
+        """A quiet hour must still fill the page, or the cap costs coverage
+        to prevent an imbalance that is not happening."""
+        from app.market.news import _merge_sources
+
+        page = _merge_sources([self._from("only", 10)], 10)
+        assert len(page) == 10
+
+    def test_the_freshest_still_leads_within_the_cap(self):
+        from app.market.news import _merge_sources
+
+        page = _merge_sources([self._from("older", 4, hour=9),
+                               self._from("newer", 4, hour=15)], 8)
+        assert page[0]["source"]["name"] == "newer"
+
+    def test_a_source_that_is_all_boilerplate_does_not_empty_the_page(self):
+        from app.market.news import _merge_sources
+
+        junk = [{"title": f"Fund {i} Takes Position in Acme Corp",
+                 "url": f"https://x/{i}", "source": {"name": "wire"},
+                 "publishedAt": "2026-09-22T12:00:00Z"} for i in range(5)]
+        assert len(_merge_sources([junk], 5)) == 5
