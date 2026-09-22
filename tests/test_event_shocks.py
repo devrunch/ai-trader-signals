@@ -229,3 +229,39 @@ class TestOnDemandOnly:
                 for i in range(10)]
         with a, b, patch("app.events.telegram.send", AsyncMock(return_value=True)):
             assert await news_job.push_shocks(loud) == shocks.MAX_PER_RUN
+
+
+class TestFalsePositives:
+    """Each of these selected on the live feed and should not have."""
+
+    def test_a_crypto_column_is_not_a_shock(self):
+        """Selected live on 'rate hike'. This desk trades gold and the
+        majors, and the pipeline's own analyser marks crypto informational
+        because no crypto trading exists anywhere in this app."""
+        assert shocks.select(article(
+            headline="Crypto enjoys bullish bounce post-Fed rate hike: Crypto Week Ahead",
+            impacts=[])) is None
+
+    def test_routine_rate_commentary_is_the_calendars_job(self):
+        """Scheduled decisions are on the calendar, and the phrase appears in
+        every market column written."""
+        assert shocks.select(article(
+            headline="Analysts split on the pace of the next rate cut",
+            impacts=[])) is None
+
+    def test_an_unscheduled_move_is_still_a_shock(self):
+        assert shocks.select(article(
+            headline="SNB announces an emergency intervention in the franc",
+            impacts=[])) is not None
+
+    def test_a_crypto_headline_that_also_moves_gold_is_still_selected(self):
+        """The exclusion is for stories that move nothing here, not a veto on
+        the word appearing."""
+        assert shocks.select(article(
+            headline="Bitcoin and gold rally as the dollar slides",
+            impacts=[{"symbol": "XAUUSD", "assetClass": "FOREX", "reason": "haven"}])) is not None
+
+    def test_the_war_headline_that_did_select_still_does(self):
+        assert shocks.select(article(
+            headline="Russia's pro-Putin party set to win election as Ukraine "
+                     "exposes war's growing reach into Moscow", impacts=[])) is not None

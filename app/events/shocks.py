@@ -55,10 +55,23 @@ _SHOCK_WORDS = (
     r"tariffs?", r"sanctions?", r"embargo", r"export controls?",
     r"strikes?", r"shutdown", r"default", r"downgrades?", r"bailout",
     r"emergency", r"intervention", r"devalu\w+", r"opec\+?",
-    r"rate cut", r"rate hike", r"unscheduled", r"resigns?", r"ousted",
+    r"unscheduled", r"resigns?", r"ousted",
     r"escalat\w+", r"retaliat\w+", r"blockade", r"coup",
 )
 _SHOCK_RE = re.compile(r"\b(?:" + "|".join(_SHOCK_WORDS) + r")\b", re.IGNORECASE)
+
+# "rate cut" and "rate hike" are deliberately NOT in that list. Scheduled rate
+# decisions are the calendar's job, and the phrases turn up in every routine
+# market column — live, they selected "Crypto enjoys bullish bounce post-Fed
+# rate hike: Crypto Week Ahead". An *unscheduled* move carries "emergency",
+# "unscheduled" or "intervention", which are in the list.
+
+# This desk is gold and the majors. The pipeline's own analyser marks crypto
+# informational because no crypto trading exists anywhere in this app, so a
+# story that only moves crypto is not a shock here however dramatic it reads.
+_CRYPTO_RE = re.compile(
+    r"\b(?:crypto\w*|bitcoin|btc|ethereum|altcoins?|stablecoins?"
+    r"|defi|nfts?|coinbase|binance)\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -113,6 +126,12 @@ def select(article: dict) -> Shock | None:
     hits = _watched_impacts(article)
     matched = _SHOCK_RE.search(f"{headline} {article.get('description') or ''}")
     if not hits and not matched:
+        return None
+
+    # A crypto story reaches the vocabulary easily — it is written in the same
+    # dramatic register — and moves nothing this desk trades. A named impact
+    # on a watched instrument still wins: a story can be about both.
+    if not hits and _CRYPTO_RE.search(headline):
         return None
 
     if hits:
