@@ -328,89 +328,36 @@ class TestDerivativeSizing:
         assert resolve("^NSEI", "NSE").asset_class is AssetClass.INDEX
         assert resolve("GOLD1!", "MCX").asset_class is AssetClass.COMMODITY
 
-    def test_a_derivative_is_never_sized_against_the_paper_account(self):
-        """The paper account is NSE/BSE only and holds simulated money. Sizing
-        an NFO contract against it produced "your 1,00,000 account is too small
-        for Nifty futures, build capital first" — real advice from a number
-        that is not the user's."""
-        from app.signals.agent.tools.trade_plan import _lot_sizing
-        from app.config import get_settings
+    def test_it_reports_what_one_lot_costs_and_nothing_about_money(self):
+        """It cannot see what the user trades with. The only balance available
+        belongs to a paper simulator, and every attempt to use it became a
+        claim about their finances — first "your 1,00,000 account is too small,
+        build capital first", then a paragraph explaining why it was not
+        advising. Both are noise between candles."""
+        from app.signals.agent.tools.trade_plan import _contract_risk
 
-        book = {"portfolio": {"totalValue": 100_000, "cashBalance": 100_000}}
-        out = _lot_sizing(entry=22_890.0, risk_per_unit=275.0, lot_size=65,
-                          book=book, risk_pct=1.0, settings=get_settings(),
-                          paper_tradable=False)
-        assert out["lots"] is None
-        assert out["sized_against"] is None
-        assert "account_value" not in out
-        assert "paper account" in out["how_to_size"]
-        # It still tells them what one lot costs, so they can size themselves.
-        assert out["risk_per_lot"] == pytest.approx(275.0 * 65)
+        out = _contract_risk(risk_per_unit=275.0, lot_size=65)
+        assert out == {"unit": "lots", "lot_size": 65,
+                       "risk_per_lot": pytest.approx(275.0 * 65)}
 
-    def test_real_capital_the_user_states_is_used(self):
-        from app.signals.agent.tools.trade_plan import _lot_sizing
-        from app.config import get_settings
+    def test_the_trade_path_never_reads_an_account(self):
+        """A grep, deliberately: the balance kept finding its way back in."""
+        from pathlib import Path
+        import app.signals.agent.tools.trade_plan as mod
 
-        out = _lot_sizing(22_890.0, 275.0, 65, {"portfolio": {}}, 1.0, get_settings(),
-                          account_value=10_000_000)
-        assert out["lots"] == int(100_000 // (275.0 * 65))
-        assert out["sized_against"] == "the capital you gave me"
+        source = Path(mod.__file__).read_text(encoding="utf-8")
+        for banned in ("ctx.book", "portfolio_tools", "totalValue",
+                       "initialCapital", "cashBalance"):
+            assert banned not in source, f"{banned} is back in the trade path"
 
-    def test_an_nse_equity_may_use_the_paper_account_but_it_is_labelled(self):
-        """There the paper account IS the account the order would be placed
-        in — but it must still be named as simulated."""
-        from app.signals.agent.tools.trade_plan import _lot_sizing
-        from app.config import get_settings
-
-        book = {"portfolio": {"totalValue": 10_000_000, "cashBalance": 10_000_000}}
-        out = _lot_sizing(22_890.0, 275.0, 65, book, 1.0, get_settings(),
-                          paper_tradable=True)
-        assert out["lots"] == int(100_000 // (275.0 * 65))
-        assert "simulated" in out["sized_against"]
-
-    def test_a_lot_count_of_zero_is_not_a_verdict_on_the_trade(self):
-        """"Too large for that figure" is arithmetic. "Your account is too
-        small, build capital first" is advice, and it was being given off a
-        simulator's balance."""
-        from app.signals.agent.tools.trade_plan import _lot_sizing
-        from app.config import get_settings
-
-        out = _lot_sizing(22_890.0, 275.0, 65, {"portfolio": {}}, 1.0, get_settings(),
-                          account_value=100_000)
-        assert out["lots"] == 0
-        assert "not a judgement about the trade" in out["note"]
-        assert "afford" in out["note"]
-
-    def test_margin_is_named_as_the_thing_we_cannot_see(self):
-        """Reporting notional as if it were the cash required understates what
-        the broker blocks by roughly five times on an index future."""
-        from app.signals.agent.tools.trade_plan import _lot_sizing
-        from app.config import get_settings
-
-        out = _lot_sizing(22_890.0, 275.0, 65, {"portfolio": {}}, 1.0, get_settings())
-        assert "margin" in out["margin_note"].lower()
-        assert "not notional" in out["margin_note"]
-
-    def test_no_capital_at_all_still_gives_the_geometry(self):
-        from app.signals.agent.tools.trade_plan import _lot_sizing
-        from app.config import get_settings
-
-        out = _lot_sizing(22_890.0, 275.0, 65, {"portfolio": {}}, 1.0, get_settings())
-        assert out["lots"] is None
-        assert out["risk_per_lot"] == pytest.approx(275.0 * 65)
-        assert out["notional_per_lot"] == pytest.approx(22_890.0 * 65)
-
-    def test_every_answer_warns_that_the_balance_is_simulated(self):
-        """Carried on the result itself, not only when sizing is skipped: the
-        agent read the paper balance as real capital and advised from it."""
-        import asyncio
+    @pytest.mark.asyncio
+    async def test_a_proposed_trade_carries_no_account_language(self):
         from app.signals.agent.toolbox import AgentToolbox
-        frame = TestTradeGeometry._frame()
-        box = AgentToolbox("^NSEI", "NSE", frame, None)
-        out = asyncio.get_event_loop().run_until_complete(
-            box.execute("propose_trade", {"direction": "BUY", "interval": "1d"}))
-        assert "PAPER" in out["capital_caveat"]
-        assert "build capital" in out["capital_caveat"]
+        box = AgentToolbox("^NSEI", "NSE", TestTradeGeometry._frame(), None)
+        out = await box.execute("propose_trade", {"direction": "BUY", "interval": "1d"})
+        blob = repr(out).lower()
+        for word in ("account", "capital", "afford", "simulated", "broker"):
+            assert word not in blob, f"{word!r} leaked into the trade"
 
 
 class TestAnswerShape:

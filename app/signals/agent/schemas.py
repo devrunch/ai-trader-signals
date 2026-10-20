@@ -78,13 +78,6 @@ TOOL_SCHEMAS: list[dict] = [
                     "interval": {"type": "string", "enum": ["5m", "15m", "1h", "1d"]},
                     "entry": {"type": "number", "description": "Omit to use the last price"},
                     "risk_pct": {"type": "number", "description": "Account risk per trade, default 1.0"},
-                    "account_value": {
-                        "type": "number",
-                        "description": ("The user's REAL trading capital, only if they have "
-                                        "stated it. Without it, sizing on a derivative is "
-                                        "left to them — this platform's account is a "
-                                        "paper simulator, not their broker balance."),
-                    },
                 },
                 "required": ["direction"],
             },
