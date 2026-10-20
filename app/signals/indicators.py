@@ -210,6 +210,18 @@ def _build_catalogue() -> dict[str, tuple[Callable, str]]:
             return {"vwap": None}
         series = pv.groupby(session).cumsum() / vol.groupby(session).cumsum()
         return {"vwap": _last(series)}
+    def breakout_probability(df):
+        # The one measured-probability reading here. Browser-only until now, so
+        # every answer about a level was reasoning: the agent could say how far
+        # a level was and never how often price had actually reached it.
+        from app.signals import breakout as breakout_mod
+        report = breakout_mod.compute(df)
+        if report is None:
+            return _absent("breakout_up_pct", "breakout_down_pct", "breakout_sample")
+        up = report.upper[0].probability if report.upper else None
+        down = report.lower[0].probability if report.lower else None
+        return {"breakout_up_pct": up, "breakout_down_pct": down,
+                "breakout_sample": report.sample}
     def price(df):
         # Not an indicator, but every consumer of this dict needs the last
         # traded price alongside it and used to get it from a second code path.
@@ -243,6 +255,9 @@ def _build_catalogue() -> dict[str, tuple[Callable, str]]:
         "cmf": (cmf, "Chaikin Money Flow"),
         "volume": (volume_stats, "Current volume vs 20-bar average"),
         "vwap": (vwap, "Volume-weighted average price"),
+        "breakout": (breakout_probability,
+                     "Breakout probability: how often price reached each level "
+                     "after a candle of this colour"),
     }
 
 

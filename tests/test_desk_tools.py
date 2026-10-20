@@ -557,3 +557,93 @@ class TestContextOnTheTrade:
         """Stretched only counts in the direction of the trade."""
         from app.signals.agent.tools.trade_plan import _stretched
         assert _stretched("SELL", 110.0, {"ema20": 100.0, "rsi": 73.0}, 5.0) is None
+
+
+class TestBreakoutProbability:
+    """The one measured-probability reading. Browser-only TypeScript until
+    now, so every answer about a level was reasoning: the agent could say how
+    far a level was and never how often price had actually reached it.
+
+    These mirror the frontend's own tests — both sides must stay in step.
+    """
+
+    @staticmethod
+    def _bars(rows):
+        import pandas as pd
+        idx = pd.date_range("2026-01-01", periods=len(rows), freq="1D")
+        return pd.DataFrame(
+            [{"open": o, "high": h, "low": l, "close": c} for o, h, l, c in rows],
+            index=idx)
+
+    def test_it_counts_a_level_as_reached_only_when_price_gets_there(self):
+        from app.signals import breakout
+        green = (100, 110, 100, 108)
+        bars = self._bars([green, (108, 115, 105, 100), green, (108, 115, 105, 100),
+                           green, (108, 115, 105, 100), green, (108, 109, 105, 100),
+                           green])
+        out = breakout.compute(bars, 1.0)
+        assert out.last_candle_green is True
+        assert out.sample == 4
+        assert out.upper[0].probability == 75.0
+
+    def test_an_untested_level_is_none_not_zero_percent(self):
+        """0% reads as "this cannot happen"."""
+        from app.signals import breakout
+        doji = (100, 101, 99, 100)
+        out = breakout.compute(self._bars([doji, doji, doji]), 1.0)
+        assert out.sample == 0
+        assert all(lvl.probability is None for lvl in out.upper)
+
+    def test_a_doji_predecessor_is_not_given_a_colour(self):
+        from app.signals import breakout
+        bars = self._bars([(100, 101, 99, 100), (108, 110, 95, 100),
+                           (100, 110, 100, 108), (108, 120, 105, 100),
+                           (100, 110, 100, 108)])
+        assert breakout.compute(bars, 1.0).sample == 1
+
+    def test_a_further_level_is_never_likelier_than_a_nearer_one(self):
+        from app.signals import breakout
+        rows = []
+        for i in range(20):
+            rows.append((100, 110, 100, 108))
+            rows.append((108, 110 + (i % 5), 100 - (i % 3), 100))
+        rows.append((100, 110, 100, 108))
+        out = breakout.compute(self._bars(rows), 0.5)
+        probs = [lvl.probability or 0 for lvl in out.upper]
+        assert all(probs[i] <= probs[i - 1] for i in range(1, len(probs)))
+
+    def test_bias_declines_to_call_a_coin_flip(self):
+        """50.4 against 49.6 is not a read, and presenting it as one is how
+        someone trades noise with a number attached."""
+        from app.signals.breakout import Breakout, Level, bias
+        flip = Breakout(upper=[Level(0, 1, 50.4)], lower=[Level(0, 1, 49.6)],
+                        last_candle_green=True, sample=50)
+        assert bias(flip) is None
+        clear = Breakout(upper=[Level(0, 1, 70.0)], lower=[Level(0, 1, 30.0)],
+                         last_candle_green=True, sample=50)
+        assert bias(clear) == {"direction": "up", "edge_pct": 40.0}
+
+    def test_reach_probability_answers_about_an_actual_price(self):
+        """"How often does it get to 10,982?" is the question an agent gets
+        asked, not "what is the ladder of one-percent steps"."""
+        from app.signals import breakout
+        rows = [(100, 110, 100, 108), (108, 115, 105, 100)] * 15 + [(100, 110, 100, 108)]
+        out = breakout.reach_probability(self._bars(rows), target=113.0)
+        assert out["direction"] == "above"
+        assert out["sample"] > 0
+        assert out["probability_pct"] is not None
+
+    def test_a_price_inside_the_last_bar_is_not_a_forecast(self):
+        from app.signals import breakout
+        rows = [(100, 110, 100, 108), (108, 115, 105, 100), (100, 110, 100, 108)]
+        out = breakout.reach_probability(self._bars(rows), target=105.0)
+        assert out["probability_pct"] is None
+        assert "inside the last bar" in out["note"]
+
+    def test_the_indicator_catalogue_serves_it(self):
+        from app.signals import indicators as ind
+        assert "breakout" in ind.available_indicators()
+        rows = [(100, 110, 100, 108), (108, 115, 105, 100)] * 30 + [(100, 110, 100, 108)]
+        out = ind.compute(self._bars(rows), ["breakout"])
+        assert out["breakout_sample"] > 0
+        assert out["breakout_up_pct"] is not None

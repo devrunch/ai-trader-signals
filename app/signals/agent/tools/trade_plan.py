@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from app.signals import analysis, confluence, validation
+from app.signals import analysis, breakout, confluence, scorecard, validation
 from app.signals import indicators as ind_mod
 from app.market.contract import AssetClass
 from app.market import symbols as symbol_registry
@@ -434,12 +434,29 @@ async def propose_trade(ctx: ToolContext, args: dict) -> Any:
 
     if spec:
         out["contract"] = spec
+    # How often price has actually reached the target from here, rather than
+    # how far away it is. The only measured probability on the answer.
+    try:
+        reach = breakout.reach_probability(df, target)
+        if reach:
+            out["target_reached_historically"] = reach
+    except Exception:
+        logger.warning("Breakout probability failed for %s", symbol, exc_info=True)
+
     stretched = _stretched(direction, entry, indicators, atr)
     if stretched:
         out["stretched"] = stretched
     higher = await _higher_timeframe(ctx, args.get("symbol"), interval, direction)
     if higher:
         out["higher_timeframe"] = higher
+
+    # Recorded whatever the verdict. The rejections are the larger claim — most
+    # days most names are refused — and a scorecard tracking only the trades it
+    # liked could never discover that the gates reject winners.
+    try:
+        out["trade_id"] = await scorecard.record({**out, "exchange": exchange})
+    except Exception:
+        logger.warning("Could not record %s for scoring", symbol, exc_info=True)
 
     ctx.results["trade"] = out
     if asset_class is AssetClass.OPTION:

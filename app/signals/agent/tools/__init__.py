@@ -12,7 +12,7 @@ three places that mention it.
 """
 from __future__ import annotations
 
-from app.signals.agent.tools import account, chart, chart_indicators, desk, graph_agent, market, strategy, trade_plan, web
+from app.signals.agent.tools import account, chart, chart_indicators, desk, graph_agent, market, screener, strategy, trade_plan, web
 from app.signals.agent.tools.base import Handler, ToolContext
 
 GROUPS: dict[str, dict[str, Handler]] = {
@@ -25,6 +25,7 @@ GROUPS: dict[str, dict[str, Handler]] = {
     "web": web.TOOLS,
     "desk": desk.TOOLS,
     "trade_plan": trade_plan.TOOLS,
+    "screener": screener.TOOLS,
 }
 
 REGISTRY: dict[str, Handler] = {

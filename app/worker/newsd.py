@@ -38,6 +38,10 @@ SCHEDULE: dict[str, tuple[str, dict]] = {
     # on a fixed cron rather than a job added to a scheduler that is not
     # listening for outside writes.
     "event-watches": ("app.events.job:run_watches", {"minute": "*/5"}),
+    # Did the trades it proposed actually work? Daily, after the Indian close
+    # and before the next agenda. Every number this platform produces is a
+    # prediction, and this is the only thing that scores them.
+    "scorecard-sweep": ("app.events.job:run_scorecard", {"minute": 45, "hour": 3}),
 }
 
 # Its own keys -- see redis_jobstore's docstring.

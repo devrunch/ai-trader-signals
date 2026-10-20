@@ -28,7 +28,7 @@ async def test_it_runs_the_desk_jobs_and_none_of_the_terminals():
     # the terminal's process, which is what lets this one be memory-capped
     # and killed on its own.
     assert set(await _jobs()) == {"news-analysis", "event-agenda", "event-watchdog",
-                                  "event-watches"}
+                                  "event-watches", "scorecard-sweep"}
     assert set(newsd.SCHEDULE) & set(terminal_scheduler.SCHEDULE) == set()
 
 

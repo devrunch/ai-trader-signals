@@ -189,3 +189,60 @@ def _watch_report(watch: dict, moved: dict) -> str:
 async def run_watchdog() -> dict:
     """Daily: did every brief we promised actually fire? See watchdog.py."""
     return await watchdog.sweep()
+
+
+@heartbeat.monitored("scorecard-sweep")
+async def run_scorecard() -> dict:
+    """Walk every open proposal forward and decide what happened.
+
+    Daily, because the window is measured in bars and the shortest one it
+    tracks is an hour. The real work is `scorecard.settle`, which is pure; this
+    fetches the bars and writes the verdict.
+    """
+    from app.market.providers.registry import market_data_router
+    from app.signals import scorecard
+
+    try:
+        pending = await scorecard.open_trades()
+    except Exception as e:
+        logger.exception("Could not read the scorecard queue")
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    settled = skipped = 0
+    for proposal in pending:
+        proposed = datetime.fromisoformat(proposal["proposed_at"])
+        age_days = max(1, (datetime.now(UTC) - proposed).days + 2)
+        try:
+            df = await market_data_router.get_historical_df(
+                proposal["symbol"], proposal["exchange"] or "NSE",
+                interval=proposal["interval"] or "1d", days=age_days + 5)
+        except Exception:
+            logger.warning("Scorecard: no bars for %s", proposal["symbol"], exc_info=True)
+            df = None
+        if df is None or df.empty:
+            skipped += 1
+            continue
+
+        after = df[df.index > proposed]
+        if after.empty:
+            skipped += 1          # proposed since the last bar; judge it later
+            continue
+        bars = [{"high": float(r.high), "low": float(r.low), "close": float(r.close)}
+                for _, r in after.iterrows()]
+        verdict = scorecard.settle(bars, proposal)
+        if verdict is None:
+            skipped += 1
+            continue
+        status, held, move = verdict
+        if status == "expired" and held < scorecard.MAX_BARS:
+            # Still inside its window. Leave it open rather than closing it
+            # early as a non-result.
+            skipped += 1
+            continue
+        await scorecard.close(proposal, status, held, move)
+        settled += 1
+
+    report = await scorecard.summary()
+    logger.info("Scorecard: %d settled, %d still open, hit rate %s",
+                settled, skipped, report.get("hit_rate_pct"))
+    return {"ok": True, "settled": settled, "still_open": skipped, **report}

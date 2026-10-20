@@ -21,7 +21,7 @@ INDICATOR_NAMES = [
     "adx", "aroon", "atr", "bollinger", "cci", "cmf", "donchian", "ema", "hma",
     "ichimoku", "keltner", "macd", "mfi", "obv", "price", "psar", "roc", "rsi",
     "sma", "stochastic", "stochrsi", "supertrend", "tsi", "ultimate_oscillator",
-    "volume", "vwap", "williams_r",
+    "breakout", "volume", "vwap", "williams_r",
 ]
 
 TOOL_SCHEMAS: list[dict] = [
@@ -48,6 +48,40 @@ TOOL_SCHEMAS: list[dict] = [
                     },
                     "interval": {"type": "string", "enum": ["1m", "5m", "15m", "1h", "1d"]},
                     "symbol": {"type": "string", "description": "Defaults to the chart symbol"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "screen_market",
+            "description": (
+                "Score and cost a list of instruments and rank them, best first. For "
+                "each it runs the full confluence panel both ways, costs a trade on "
+                "the side the panel favours, and applies the same gates the signal "
+                "engine uses. Use this for \"what should I trade today\", \"anything "
+                "setting up\", or any question about more than two instruments — "
+                "calling propose_trade in a loop wastes rounds. Most names are "
+                "rejected most days; say so rather than presenting the least-bad one "
+                "as a trade."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbols": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": ("Up to 30. Omit to use the watchlist, or a liquid "
+                                        "NSE default list when there is none."),
+                    },
+                    "exchange": {"type": "string", "enum": ["NSE", "BSE", "MCX", "NFO", "FOREX"]},
+                    "interval": {"type": "string", "enum": ["15m", "1h", "1d"]},
+                    "entry_mode": {
+                        "type": "string", "enum": ["market", "level", "retest"],
+                        "description": "Default 'level' — far more names clear reward:risk on a pullback than at market.",
+                    },
+                    "min_confluence": {"type": "number", "description": "Hide anything agreeing less than this, 0-100"},
+                    "tradeable_only": {"type": "boolean", "description": "Only names that pass every gate"},
                 },
             },
         },

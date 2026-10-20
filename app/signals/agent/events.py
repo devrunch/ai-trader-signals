@@ -94,6 +94,7 @@ _TOOL_LABELS: dict[str, str] = {
     "get_news": "Reading the news feed",
     "get_fundamentals": "Reading the balance sheet",
     "propose_trade": "Costing the trade",
+    "screen_market": "Screening the market",
     "list_chart_indicators": "Checking what's on the chart",
     "set_indicator_params": "Adjusting indicator settings",
     "edit_indicator_source": "Rewriting the indicator",
