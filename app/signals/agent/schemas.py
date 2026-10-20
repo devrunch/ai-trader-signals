@@ -55,6 +55,89 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "get_events",
+            "description": (
+                "Scheduled economic releases that can move this instrument, with each "
+                "one's forecast, previous value, and which way a beat points for its "
+                "currency. Use this instead of web_search for anything calendar-shaped "
+                "— it is this desk's own calendar, exact and already filtered to the "
+                "currencies that drive the symbol."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "Defaults to the chart symbol"},
+                    "currencies": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": "Override the drivers, e.g. [\"USD\",\"EUR\"]",
+                    },
+                    "high_impact_only": {"type": "boolean"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_event_reactions",
+            "description": (
+                "What a market actually did after past prints of one release, measured "
+                "from minute bars. Call it after get_events to answer \"what happens if "
+                "it beats\" with history rather than reasoning. Says so plainly when the "
+                "sample is too thin to mean anything."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "currency": {"type": "string", "description": "e.g. USD"},
+                    "title": {"type": "string", "description": "The release title exactly as get_events gives it"},
+                    "symbol": {"type": "string", "description": "What to measure; defaults to gold"},
+                },
+                "required": ["currency", "title"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_news",
+            "description": (
+                "Recent headlines, each already scored for sentiment and for which "
+                "instruments it moves. Prefer this over web_search for \"what is moving "
+                "and why\" — it returns a list of movers, where a web search returns "
+                "prose about the market."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "Filter to stories touching this instrument"},
+                    "limit": {"type": "integer", "description": "How many headlines, up to 10"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_fundamentals",
+            "description": (
+                "Balance-sheet numbers for an Indian listed company (NSE/BSE): market "
+                "cap, P/E, book value, ROCE, ROE, dividend yield, sales and profit "
+                "growth, and the published pros and cons. The one thing here that cannot "
+                "be computed from price. Not available for forex, metals or US symbols."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "NSE/BSE trading symbol, e.g. RELIANCE"},
+                    "exchange": {"type": "string", "enum": ["NSE", "BSE"]},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_candles",
             "description": "Fetch recent OHLCV candles for a symbol at a chosen timeframe. Use to inspect real price action, check a lower timeframe for a recent reversal, or a higher timeframe for trend context.",
             "parameters": {

@@ -251,6 +251,32 @@ async def snapshot(ctx: ToolContext, symbol: str) -> dict | None:
     }
 
 
+async def get_fundamentals(ctx: ToolContext, args: dict) -> Any:
+    """Balance-sheet numbers for an Indian listed company.
+
+    The one thing this platform cannot derive from price. Fetched per symbol
+    when asked, not screened in bulk: screener.in's own screens are
+    login-gated and their robots.txt disallows pagination, so a result set
+    cannot be walked.
+    """
+    from app.market import fundamentals as fund_mod
+
+    symbol = str(args.get("symbol") or ctx.symbol).strip().upper()
+    exchange = str(args.get("exchange") or ctx.exchange).strip().upper()
+    if exchange not in ("NSE", "BSE"):
+        return {"error": f"Fundamentals cover Indian listed companies. {exchange} "
+                         "instruments have no balance sheet to read."}
+    try:
+        data = await fund_mod.fetch(symbol, refresh=bool(args.get("refresh")))
+    except fund_mod.FundamentalsError as e:
+        return {"error": str(e), "symbol": symbol}
+
+    out = data.to_dict()
+    out["note"] = ("Fundamentals describe the business, not the setup. They do "
+                   "not time an entry.")
+    return out
+
+
 TOOLS: dict[str, Handler] = {
     "read_chart": read_chart,
     "get_candles": get_candles,
@@ -259,4 +285,5 @@ TOOLS: dict[str, Handler] = {
     "get_levels": get_levels,
     "compare_symbols": compare_symbols,
     "scan_watchlist": scan_watchlist,
+    "get_fundamentals": get_fundamentals,
 }

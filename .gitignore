@@ -13,3 +13,6 @@ build/
 
 # Node.js (app/pine_sandbox -- the PineTS sandbox subprocess)
 node_modules/
+
+# Timestamped .env backups — these hold real credentials.
+.env.bak*
