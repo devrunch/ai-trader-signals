@@ -317,6 +317,7 @@ async def propose_trade(ctx: ToolContext, args: dict) -> Any:
 
     if spec:
         out["contract"] = spec
+    ctx.results["trade"] = out
     if asset_class is AssetClass.OPTION:
         # The gates measure price. An option's premium is direction, implied
         # volatility and time decay fused together: an ATR stop on it is not a
@@ -334,6 +335,7 @@ async def propose_trade(ctx: ToolContext, args: dict) -> Any:
         )
         out.pop("rejected_because", None)
         out.pop("to_make_it_work", None)
+        ctx.results["trade"] = out
         return out
 
     if direction == "SELL":
@@ -352,6 +354,12 @@ async def propose_trade(ctx: ToolContext, args: dict) -> Any:
     else:
         out["note"] = ("Every gate passed. Numbers are computed here, not estimated — quote "
                        "them as given.")
+
+    # The terminal renders this as a card beside the answer. Published here
+    # rather than left for the model to retype: a card can only appear when the
+    # geometry was actually computed, so a turn that answered from read_chart
+    # alone shows no numbers instead of plausible prose.
+    ctx.results["trade"] = out
 
     # Said on every answer, not only when sizing is skipped. The balance here
     # is a simulator's, and the agent has already turned it into "your account

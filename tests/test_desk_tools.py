@@ -446,3 +446,51 @@ class TestAnswerShape:
     def test_the_numbers_line_is_shown_not_described(self):
         p = self._prompt()
         assert "Entry 22,894 | Stop 22,806" in p
+
+    def test_a_trade_question_must_cost_a_propose_trade(self):
+        """Asked in the terminal, the agent answered from read_chart alone and
+        produced no entry, stop or target at all — correct prose, no trade.
+        With the card, skipping the tool means the user sees no numbers."""
+        p = self._prompt()
+        assert "MUST call propose_trade" in p
+        assert "is not an answer to that question" in p
+
+
+class TestTradeCardPlumbing:
+    """The card is driven by ctx.results["trade"], not retyped by the model.
+
+    That is the point: a card can only appear when the geometry was actually
+    computed, so a turn answering from the chart alone shows no numbers
+    instead of plausible ones.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_passing_trade_is_published_to_the_ui(self):
+        from app.signals.agent.toolbox import AgentToolbox
+        box = AgentToolbox("^NSEI", "NSE", TestTradeGeometry._frame(), None)
+        await box.execute("propose_trade", {"direction": "BUY", "interval": "1d"})
+        card = box.results.get("trade")
+        assert card is not None
+        for key in ("verdict", "entry", "stop", "target", "reward_risk", "direction"):
+            assert key in card, key
+
+    @pytest.mark.asyncio
+    async def test_a_rejected_trade_is_published_too(self):
+        """A rejection is an answer. Publishing only the passes would leave the
+        card blank exactly when the user most needs to see why not."""
+        from app.signals.agent.toolbox import AgentToolbox
+        box = AgentToolbox("^NSEI", "NSE", TestTradeGeometry._frame(), None)
+        out = await box.execute("propose_trade", {"direction": "BUY", "interval": "1d"})
+        if out["verdict"] == "rejected":
+            assert box.results["trade"]["verdict"] == "rejected"
+            assert box.results["trade"]["rejected_because"]
+
+    @pytest.mark.asyncio
+    async def test_an_error_publishes_no_card(self):
+        """An error is not a trade. Publishing a card for one would put an
+        empty grid of levels beside a message saying it could not be done."""
+        from app.signals.agent.toolbox import AgentToolbox
+        box = AgentToolbox("^NSEI", "NSE", TestTradeGeometry._frame(), None)
+        out = await box.execute("propose_trade", {"direction": "MAYBE", "interval": "1d"})
+        assert "error" in out
+        assert "trade" not in box.results
