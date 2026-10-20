@@ -468,3 +468,92 @@ class TestTradeCardPlumbing:
         assert set(panel["families"]) <= {"trend", "momentum", "location"}
         assert "agreed" in panel and "disagreed" in panel
 
+
+
+class TestEntryModes:
+    """Entering at the last price is what rejected everything.
+
+    Scanning 29 Nifty names, 24 failed on reward:risk alone — HCLTECH at
+    94.4% agreement, POWERGRID at 95.2%. The agreement was fine; a stop one
+    ATR from the last traded price leaves no room to the next level, so the
+    reward was gone before the setup was judged. Entry at a pullback level
+    took the pass rate from 1 of 29 to 8.
+    """
+
+    async def _at(self, mode, direction="BUY"):
+        from app.signals.agent.toolbox import AgentToolbox
+        box = AgentToolbox("^NSEI", "NSE", TestTradeGeometry._frame(), None)
+        return await box.execute("propose_trade", {
+            "direction": direction, "interval": "1d", "entry_mode": mode})
+
+    @pytest.mark.asyncio
+    async def test_market_enters_at_the_last_price(self):
+        out = await self._at("market")
+        assert out["entry"] == out["last_price"]
+        assert out["order_type"] == "market"
+
+    @pytest.mark.asyncio
+    async def test_a_level_entry_is_a_limit_order_away_from_the_price(self):
+        out = await self._at("level")
+        assert out["order_type"] == "limit"
+        assert out["distance_from_price_pct"] is not None
+
+    @pytest.mark.asyncio
+    async def test_the_drift_gate_only_judges_a_market_order(self):
+        """It exists to stop a price being invented far from the market, not
+        to forbid a limit order. Applied to one, it rejected every level entry
+        on the scan even where reward:risk had improved past the floor."""
+        market = await self._at("market")
+        level = await self._at("level")
+        assert any(g["gate"] == "entry_drift" for g in market["gates"])
+        assert not any(g["gate"] == "entry_drift" for g in level["gates"])
+
+    @pytest.mark.asyncio
+    async def test_a_retest_target_is_not_the_level_being_retested(self):
+        """It was. The target became the very level the entry had just
+        crossed, a tenth of an ATR away, so every retest scored R:R 0.1."""
+        out = await self._at("retest")
+        if out.get("reward_risk") is not None:
+            assert out["reward_risk"] > 0.2
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_entry_beats_the_mode(self):
+        from app.signals.agent.toolbox import AgentToolbox
+        box = AgentToolbox("^NSEI", "NSE", TestTradeGeometry._frame(), None)
+        out = await box.execute("propose_trade", {
+            "direction": "BUY", "interval": "1d", "entry_mode": "level", "entry": 12345.0})
+        assert out["entry"] == 12345.0
+        assert "gave me" in out["entry_from"]
+
+
+class TestContextOnTheTrade:
+    async def _trade(self, direction="BUY"):
+        from app.signals.agent.toolbox import AgentToolbox
+        box = AgentToolbox("^NSEI", "NSE", TestTradeGeometry._frame(), None)
+        return await box.execute("propose_trade", {"direction": direction, "interval": "1d"})
+
+    @pytest.mark.asyncio
+    async def test_it_says_whether_a_trend_reading_means_anything(self):
+        """ADX below 20 is a range, and in a range an EMA cross and a
+        SuperTrend flip are noise with a direction attached."""
+        out = await self._trade()
+        assert out["regime"]["kind"] in ("range", "weak", "trending", "unknown")
+        assert out["regime"]["note"]
+
+    @pytest.mark.asyncio
+    async def test_a_stretched_entry_is_flagged(self):
+        """TCS scored 94.4% for a BUY at RSI 73 — high agreement precisely
+        because price had already run. rsi_extreme only vetoes past 75."""
+        from app.signals.agent.tools.trade_plan import _stretched
+        out = _stretched("BUY", entry=110.0, indicators={"ema20": 100.0, "rsi": 73.0}, atr=5.0)
+        assert out and out["atr_from_ema20"] == pytest.approx(2.0)
+        assert "already happened" in out["note"]
+
+    def test_a_normal_entry_is_not_flagged_as_stretched(self):
+        from app.signals.agent.tools.trade_plan import _stretched
+        assert _stretched("BUY", 101.0, {"ema20": 100.0, "rsi": 55.0}, 5.0) is None
+
+    def test_selling_above_the_mean_is_not_chasing(self):
+        """Stretched only counts in the direction of the trade."""
+        from app.signals.agent.tools.trade_plan import _stretched
+        assert _stretched("SELL", 110.0, {"ema20": 100.0, "rsi": 73.0}, 5.0) is None

@@ -76,7 +76,17 @@ TOOL_SCHEMAS: list[dict] = [
                     "direction": {"type": "string", "enum": ["BUY", "SELL"]},
                     "symbol": {"type": "string", "description": "Defaults to the chart symbol"},
                     "interval": {"type": "string", "enum": ["5m", "15m", "1h", "1d"]},
-                    "entry": {"type": "number", "description": "Omit to use the last price"},
+                    "entry_mode": {
+                        "type": "string", "enum": ["market", "level", "retest"],
+                        "description": ("Where to enter. 'market' is the last price. "
+                                        "'level' is the nearest support below (long) or "
+                                        "resistance above (short) — where a pullback "
+                                        "would fill. 'retest' is just through that level. "
+                                        "Entering at market is usually what fails "
+                                        "reward:risk, so if a setup is rejected on R:R, "
+                                        "try 'level' before concluding there is no trade."),
+                    },
+                    "entry": {"type": "number", "description": "An exact price. Overrides entry_mode."},
                     "risk_pct": {"type": "number", "description": "Account risk per trade, default 1.0"},
                 },
                 "required": ["direction"],
