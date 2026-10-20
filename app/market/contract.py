@@ -26,6 +26,12 @@ class AssetClass(StrEnum):
     FX = "fx"
     METAL = "metal"
     COMMODITY = "commodity"
+    # An exchange-traded derivative: a dated contract with a lot size, so
+    # sizing is in lots and the series dies at expiry. Distinguished from
+    # EQUITY because almost everything downstream that assumes "one unit =
+    # one share" is wrong here.
+    FUTURE = "future"
+    OPTION = "option"
 
 
 class VolumeSource(StrEnum):

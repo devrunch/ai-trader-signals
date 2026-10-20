@@ -22,10 +22,31 @@ DERIV = "deriv"
 KITE = "kite"
 YFINANCE = "yfinance"
 
-_KITE_EXCHANGES = frozenset({"NSE", "BSE", "MCX"})
+_KITE_EXCHANGES = frozenset({"NSE", "BSE", "MCX", "NFO"})
+# NSE's derivatives segment. Nifty itself is an index and cannot be
+# bought; it trades here as futures and options, so a Nifty TRADE is
+# always an NFO instrument even though the Nifty CHART is an NSE index.
+_OPTION_SUFFIXES = ("CE", "PE")
 _METALS = frozenset({"XAUUSD", "XAGUSD", "XPTUSD", "XPDUSD"})
 
 _INTRADAY_AND_DAILY = frozenset({"1m", "5m", "15m", "30m", "1h", "1d"})
+
+
+def _kite_asset_class(symbol: str, exchange: str) -> AssetClass:
+    """What kind of thing this is, which decides how it gets sized.
+
+    NFO carries both futures and options and they are not interchangeable: a
+    future is price-like and most of the platform's maths transfers, while an
+    option's premium carries volatility and time decay and almost none of it
+    does. Calling both "equity" is how a 65-lot contract gets sized as one
+    share.
+    """
+    if exchange == "MCX":
+        return AssetClass.COMMODITY
+    if exchange == "NFO":
+        return (AssetClass.OPTION if symbol.endswith(_OPTION_SUFFIXES)
+                else AssetClass.FUTURE)
+    return _index_or_equity(symbol)
 
 
 def _index_or_equity(symbol: str) -> AssetClass:
@@ -67,7 +88,7 @@ def resolve(symbol: str, hint_exchange: str | None = None) -> SymbolInfo | None:
             symbol=symbol,
             vendor_symbol=f"{hint}:{symbol}",
             provider=KITE,
-            asset_class=AssetClass.COMMODITY if hint == "MCX" else _index_or_equity(symbol),
+            asset_class=_kite_asset_class(symbol, hint),
             exchange=hint,
             session=sessions.MCX if hint == "MCX" else sessions.NSE,
             volume_source=VolumeSource.EXCHANGE,

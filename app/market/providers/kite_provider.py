@@ -63,6 +63,9 @@ _INDEX_ALIASES = {"^NSEI": "NIFTY 50", "^BSESN": "SENSEX"}
 # freshly derived from Kite's own real, vendor-sourced instrument dump
 # (refreshed every _INSTRUMENTS_TTL_SECONDS), never a hand-maintained
 # mapping that could drift stale.
+# Exchanges whose instruments are dated contracts, so "SYMBOL1!" means
+# something. NSE and BSE cash have no expiry and no front month.
+_DATED_EXCHANGES = frozenset({"MCX", "NFO"})
 _CONTINUOUS_SUFFIX = "1!"  # what search() suggests -- always front month
 _CONTINUOUS_PATTERN = re.compile(r"^(.+?)(\d+)!$")
 
@@ -202,6 +205,17 @@ class KiteProvider:
         # (strikes, premium, a different P&L model entirely) not attempted
         # here. Every kept row needs a real `expiry` for the continuous-
         # contract resolution in `_resolve_row` to work at all.
+        # NFO: NSE's derivatives segment. Everything here is dated, so the
+        # same `expiry` filter and continuous-contract resolution the MCX
+        # branch needs applies unchanged. Measured on the box: all 38,563 rows
+        # keyed by tradingsymbol cost 35.8 MB against ~1 GB free, so the whole
+        # segment is kept rather than guessing which underlyings matter.
+        nfo_rows = self._kite.instruments("NFO")
+        self._instruments["NFO"] = {
+            r["tradingsymbol"]: r for r in nfo_rows
+            if r.get("instrument_type") in ("FUT", "CE", "PE") and r.get("expiry")
+        }
+
         mcx_rows = self._kite.instruments("MCX")
         self._instruments["MCX"] = {
             r["tradingsymbol"]: r for r in mcx_rows
@@ -228,21 +242,48 @@ class KiteProvider:
         every call rather than cached as a decision."""
         exch = exchange.upper()
         sym = kite_symbol(symbol)
-        if exch == "MCX":
+        if exch in _DATED_EXCHANGES:
             parsed = _parse_continuous(sym)
             if parsed:
                 name, rank = parsed
-                return self._resolve_mcx_continuous(name, rank)
+                return self._resolve_continuous(name, rank, exch)
         return self._instruments.get(exch, {}).get(sym)
 
-    def _resolve_mcx_continuous(self, name: str, rank: int = 1) -> dict[str, Any] | None:
+    def contract_spec(self, symbol: str, exchange: str) -> dict[str, Any] | None:
+        """Lot size, tick size and expiry for a dated contract.
+
+        Public because sizing needs it and nothing else can know it: one lot
+        of Nifty futures is 65 index points of exposure, so a caller that
+        treats the quantity as shares is wrong by that factor. None for a cash
+        instrument, which has no lot.
+        """
+        self._ensure_instruments()
+        row = self._resolve_row(symbol, exchange)
+        if not row or not row.get("expiry"):
+            return None
+        return {
+            "resolved_symbol": row.get("tradingsymbol"),
+            "underlying": row.get("name"),
+            "instrument_type": row.get("instrument_type"),
+            "lot_size": int(row.get("lot_size") or 0) or None,
+            "tick_size": row.get("tick_size"),
+            "strike": row.get("strike") or None,
+            "expiry": str(row.get("expiry")),
+        }
+
+    def _resolve_continuous(self, name: str, rank: int = 1,
+                            exchange: str = "MCX") -> dict[str, Any] | None:
         """rank=1 is front month (nearest, not yet expired), rank=2 the one
         after that, and so on -- TradingView's own SYMBOL1!/SYMBOL2!/...
         convention."""
         today = date.today()
         candidates = sorted(
-            (row for row in self._instruments.get("MCX", {}).values()
-             if str(row.get("name", "")).upper() == name.upper() and _as_date(row.get("expiry")) >= today),
+            (row for row in self._instruments.get(exchange, {}).values()
+             # FUT only: a continuous OPTION is meaningless, since the series a
+             # strike belongs to changes with every roll.
+             if str(row.get("name", "")).upper() == name.upper()
+             and row.get("instrument_type") == "FUT"
+             and _as_date(row.get("expiry")) >= today),
             key=lambda row: _as_date(row["expiry"]),
         )
         if rank < 1 or rank > len(candidates):

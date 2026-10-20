@@ -31,6 +31,8 @@ from typing import Any
 from app.signals import analysis, validation
 from app.signals import indicators as ind_mod
 from app.signals.agent import portfolio_tools
+from app.market.contract import AssetClass
+from app.market import symbols as symbol_registry
 from app.signals.agent.tools.base import BASE_INTERVAL, Handler, ToolContext
 
 logger = logging.getLogger(__name__)
@@ -47,6 +49,69 @@ _STRUCTURE_BUFFER_ATR = 0.15
 # than 1.0x ATR (274.86)"). Placing a stop at exactly the minimum allowed is
 # fragile anyway -- no desk does that either.
 _FLOOR_SLACK = 1.002
+
+
+def _contract(symbol: str, exchange: str) -> tuple[AssetClass | None, dict | None]:
+    """What kind of instrument this is, and its lot if it has one.
+
+    A derivative's quantity is lots, not units. One Nifty futures lot is 65
+    index points of exposure, so sizing that treats the number as shares is
+    wrong by that factor — and silently, because the number still looks
+    plausible.
+    """
+    info = symbol_registry.resolve(symbol, exchange)
+    if info is None:
+        return None, None
+    if info.asset_class not in (AssetClass.FUTURE, AssetClass.OPTION):
+        return info.asset_class, None
+    try:
+        from app.market.providers.registry import market_data_router
+        provider = market_data_router.providers.get(exchange.upper())
+        spec = provider.contract_spec(symbol, exchange) if provider else None
+    except Exception:
+        logger.warning("Could not read the contract spec for %s", symbol, exc_info=True)
+        spec = None
+    return info.asset_class, spec
+
+
+def _lot_sizing(entry: float, risk_per_unit: float, lot_size: int, book: dict,
+                risk_pct: float, settings) -> dict:
+    """Lots, not units, and margin named as the thing we cannot see.
+
+    Reporting a notional as if it were the cash required would understate what
+    the broker blocks by roughly five times on an index future. Saying so is
+    better than printing a number that is wrong in the dangerous direction.
+    """
+    if "error" in book:
+        return book
+    pf = book.get("portfolio") or {}
+    account = pf.get("totalValue") or pf.get("initialCapital")
+    risk_per_lot = risk_per_unit * lot_size
+    notional_per_lot = entry * lot_size
+    out = {
+        "unit": "lots",
+        "lot_size": lot_size,
+        "risk_per_lot": round(risk_per_lot, 2),
+        "notional_per_lot": round(notional_per_lot, 2),
+        "margin_note": ("Futures and options are bought on margin, not notional. "
+                        "The broker's SPAN + exposure requirement is not available "
+                        "here, so treat notional as exposure and check margin with "
+                        "your broker before sizing up."),
+    }
+    if account is None:
+        out["lots"] = None
+        out["error"] = "Connect an account to size this in lots."
+        return out
+    risk_pct = max(settings.min_risk_pct, min(risk_pct, settings.max_risk_pct))
+    budget = account * risk_pct / 100
+    out["account_value"] = account
+    out["risk_budget"] = round(budget, 2)
+    out["lots"] = int(budget // risk_per_lot) if risk_per_lot > 0 else 0
+    if out["lots"] == 0:
+        out["note"] = (f"One lot risks {risk_per_lot:,.0f} against a {budget:,.0f} "
+                       f"budget at {risk_pct}%. This contract is too large for "
+                       "this account at this stop.")
+    return out
 
 
 def _round(symbol: str, value: float) -> float:
@@ -173,9 +238,19 @@ async def propose_trade(ctx: ToolContext, args: dict) -> Any:
     gates = _gates(direction, entry, target, stop, indicators, atr, ltp, ctx.settings)
     failed = [g for g in gates if not g["passed"]]
 
-    sizing = portfolio_tools.position_size(await ctx.book(), entry, stop,
-                                           float(args.get("risk_pct") or 1.0),
-                                           settings=ctx.settings)
+    exchange = str(args.get("exchange") or ctx.exchange).upper()
+    asset_class, spec = _contract(symbol, exchange)
+    risk_pct = float(args.get("risk_pct") or 1.0)
+    if spec and spec.get("lot_size"):
+        sizing = _lot_sizing(entry, risk, spec["lot_size"], await ctx.book(),
+                             risk_pct, ctx.settings)
+    else:
+        sizing = portfolio_tools.position_size(await ctx.book(), entry, stop,
+                                               risk_pct, settings=ctx.settings)
+        if isinstance(sizing, dict):
+            # Named explicitly so a lot count and a share count can never be
+            # read as the same number.
+            sizing.setdefault("unit", "units")
 
     out: dict[str, Any] = {
         "symbol": symbol,
@@ -206,6 +281,27 @@ async def propose_trade(ctx: ToolContext, args: dict) -> Any:
                    "supertrend_dir": indicators.get("supertrend_dir"),
                    "ema20": indicators.get("ema20"), "ema50": indicators.get("ema50")},
     }
+
+    if spec:
+        out["contract"] = spec
+    if asset_class is AssetClass.OPTION:
+        # The gates measure price. An option's premium is direction, implied
+        # volatility and time decay fused together: an ATR stop on it is not a
+        # stop on the underlying, reward:risk is not linear in the index move,
+        # and indicator agreement is computed on a series that decays to zero
+        # by expiry. Reported, not silently applied to the wrong thing.
+        out["verdict"] = "not_applicable"
+        out["gates"] = []
+        out["note"] = (
+            "These gates measure price, and an option's premium is not price — it "
+            "carries implied volatility and time decay too. An ATR stop here is not "
+            "a stop on Nifty, and reward:risk does not hold as the index moves. "
+            "Analyse the underlying, then choose a strike. Do not present this "
+            "geometry as an option trade."
+        )
+        out.pop("rejected_because", None)
+        out.pop("to_make_it_work", None)
+        return out
 
     if direction == "SELL":
         # Said plainly rather than letting the gate delete the answer: the

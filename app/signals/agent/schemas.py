@@ -65,7 +65,10 @@ TOOL_SCHEMAS: list[dict] = [
                 "Quote the numbers exactly as returned. If the verdict is 'rejected', say "
                 "the trade is not recommended and why — do not present it as a "
                 "suggestion. Call it once per direction you are seriously considering, not "
-                "once for each so you can offer both."
+                "once for each so you can offer both. Nifty itself cannot be bought "
+                "— it is an index. To trade it, pass exchange NFO and a contract "
+                "such as NIFTY1! (front-month future); sizing then comes back in "
+                "lots, not units."
             ),
             "parameters": {
                 "type": "object",

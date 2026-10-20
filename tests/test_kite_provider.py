@@ -194,6 +194,17 @@ class TestGetHistoricalDf:
         assert provider._get_historical_df_sync("RELIANCE", "NSE", "1d", 30) is None
 
 
+def _instrument_dumps(**by_exchange):
+    """Mock `kite.instruments` keyed by exchange rather than by call order.
+
+    The positional form (`side_effect=[nse, bse, mcx]`) encoded how many
+    segments the provider loads and in what order, so adding NFO silently
+    handed the MCX fixture to NFO and ran the list dry. Keyed by name, a new
+    segment defaults to empty and no existing test cares.
+    """
+    return MagicMock(side_effect=lambda exchange: list(by_exchange.get(exchange, [])))
+
+
 class TestSearch:
     def test_matches_symbol_or_name_case_insensitively_eq_only(self):
         provider = _provider_with_token()
@@ -272,15 +283,11 @@ class TestSearch:
         exercises the real _ensure_instruments() filtering (not a pre-filtered
         fixture), since that's where the bug actually lived."""
         provider = _provider_with_token()
-        provider._kite.instruments = MagicMock(side_effect=[
-            [
-                {"tradingsymbol": "RELIANCE", "name": "RELIANCE INDUSTRIES",
-                 "instrument_token": 738561, "instrument_type": "EQ"},
-                {"tradingsymbol": "NIFTY DIV OPPS 50", "name": "NIFTY DIV OPPS 50",
-                 "instrument_token": 1, "instrument_type": "EQ"},
-            ],
-            [],
-            [],  # MCX -- empty, not exercised by this test
+        provider._kite.instruments = _instrument_dumps(NSE=[
+            {"tradingsymbol": "RELIANCE", "name": "RELIANCE INDUSTRIES",
+             "instrument_token": 738561, "instrument_type": "EQ"},
+            {"tradingsymbol": "NIFTY DIV OPPS 50", "name": "NIFTY DIV OPPS 50",
+             "instrument_token": 1, "instrument_type": "EQ"},
         ])
 
         results = provider._search_sync("nifty", limit=8)
@@ -294,15 +301,11 @@ class TestSearch:
         junk listings above — but it carries segment "INDICES", which junk
         EQ rows don't, so it must survive the filter that excludes them."""
         provider = _provider_with_token()
-        provider._kite.instruments = MagicMock(side_effect=[
-            [
-                {"tradingsymbol": "NIFTY 50", "name": "NIFTY 50",
-                 "instrument_token": 256265, "instrument_type": "EQ", "segment": "INDICES"},
-                {"tradingsymbol": "NIFTY DIV OPPS 50", "name": "NIFTY DIV OPPS 50",
-                 "instrument_token": 1, "instrument_type": "EQ"},
-            ],
-            [],
-            [],  # MCX -- empty, not exercised by this test
+        provider._kite.instruments = _instrument_dumps(NSE=[
+            {"tradingsymbol": "NIFTY 50", "name": "NIFTY 50",
+             "instrument_token": 256265, "instrument_type": "EQ", "segment": "INDICES"},
+            {"tradingsymbol": "NIFTY DIV OPPS 50", "name": "NIFTY DIV OPPS 50",
+             "instrument_token": 1, "instrument_type": "EQ"},
         ])
 
         results = provider._search_sync("nifty", limit=8)
@@ -337,15 +340,12 @@ class TestMcxContinuousContracts:
 
     def test_ensure_instruments_keeps_only_futures_with_a_real_expiry(self):
         provider = _provider_with_token()
-        provider._kite.instruments = MagicMock(side_effect=[
-            [], [],  # NSE, BSE -- empty, not exercised here
-            [
-                *MCX_INSTRUMENTS,
-                {"tradingsymbol": "GOLD25DEC5000CE", "name": "GOLD", "instrument_token": 200,
-                 "instrument_type": "CE", "segment": "MCX-OPT", "expiry": TODAY + timedelta(days=30)},
-                {"tradingsymbol": "JUNKNOFUT", "name": "JUNK", "instrument_token": 201,
-                 "instrument_type": "FUT", "segment": "MCX", "expiry": None},
-            ],
+        provider._kite.instruments = _instrument_dumps(MCX=[
+            *MCX_INSTRUMENTS,
+            {"tradingsymbol": "GOLD25DEC5000CE", "name": "GOLD", "instrument_token": 200,
+             "instrument_type": "CE", "segment": "MCX-OPT", "expiry": TODAY + timedelta(days=30)},
+            {"tradingsymbol": "JUNKNOFUT", "name": "JUNK", "instrument_token": 201,
+             "instrument_type": "FUT", "segment": "MCX", "expiry": None},
         ])
 
         provider._ensure_instruments()

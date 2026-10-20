@@ -299,3 +299,73 @@ class TestTradeGeometry:
         for key in ("entry", "stop", "target", "risk_per_unit", "reward_per_unit",
                     "reward_risk", "atr", "stop_in_atr", "how_stop_was_placed"):
             assert out.get(key) is not None, key
+
+
+class TestDerivativeSizing:
+    """Nifty cannot be bought. It trades as NFO futures and options, and a
+    contract's quantity is lots — one Nifty futures lot is 65 index points of
+    exposure. Code that treats that number as shares is wrong by 65x, and
+    silently, because the number still looks plausible.
+    """
+
+    def test_an_nfo_future_routes_to_kite_as_a_future(self):
+        from app.market.contract import AssetClass
+        from app.market.symbols import resolve
+        for symbol in ("NIFTY1!", "NIFTY26OCTFUT"):
+            info = resolve(symbol, "NFO")
+            assert info is not None and info.asset_class is AssetClass.FUTURE
+
+    def test_a_strike_routes_as_an_option_not_a_future(self):
+        from app.market.contract import AssetClass
+        from app.market.symbols import resolve
+        for symbol in ("NIFTY26OCT22900CE", "NIFTY26OCT22900PE"):
+            assert resolve(symbol, "NFO").asset_class is AssetClass.OPTION
+
+    def test_cash_equity_is_untouched_by_the_nfo_change(self):
+        from app.market.contract import AssetClass
+        from app.market.symbols import resolve
+        assert resolve("RELIANCE", "NSE").asset_class is AssetClass.EQUITY
+        assert resolve("^NSEI", "NSE").asset_class is AssetClass.INDEX
+        assert resolve("GOLD1!", "MCX").asset_class is AssetClass.COMMODITY
+
+    def test_lot_sizing_reports_risk_per_lot_not_per_unit(self):
+        from app.signals.agent.tools.trade_plan import _lot_sizing
+        from app.config import get_settings
+
+        book = {"portfolio": {"totalValue": 1_000_000, "cashBalance": 1_000_000}}
+        out = _lot_sizing(entry=22_890.0, risk_per_unit=275.0, lot_size=65,
+                          book=book, risk_pct=1.0, settings=get_settings())
+        assert out["unit"] == "lots"
+        assert out["risk_per_lot"] == pytest.approx(275.0 * 65)
+        assert out["notional_per_lot"] == pytest.approx(22_890.0 * 65)
+        # 1% of 10,00,000 is 10,000; one lot risks 17,875 — too big.
+        assert out["lots"] == 0
+        assert "too large for this account" in out["note"]
+
+    def test_a_big_enough_account_gets_lots(self):
+        from app.signals.agent.tools.trade_plan import _lot_sizing
+        from app.config import get_settings
+
+        book = {"portfolio": {"totalValue": 10_000_000, "cashBalance": 10_000_000}}
+        out = _lot_sizing(entry=22_890.0, risk_per_unit=275.0, lot_size=65,
+                          book=book, risk_pct=1.0, settings=get_settings())
+        assert out["lots"] == int(100_000 // (275.0 * 65))
+
+    def test_margin_is_named_as_the_thing_we_cannot_see(self):
+        """Reporting notional as if it were the cash required understates what
+        the broker blocks by roughly five times on an index future."""
+        from app.signals.agent.tools.trade_plan import _lot_sizing
+        from app.config import get_settings
+
+        out = _lot_sizing(22_890.0, 275.0, 65, {"portfolio": {}}, 1.0, get_settings())
+        assert "margin" in out["margin_note"].lower()
+        assert "not notional" in out["margin_note"]
+
+    def test_no_account_gives_geometry_without_a_lot_count(self):
+        from app.signals.agent.tools.trade_plan import _lot_sizing
+        from app.config import get_settings
+
+        out = _lot_sizing(22_890.0, 275.0, 65, {"portfolio": {}}, 1.0, get_settings())
+        assert out["lots"] is None
+        assert out["risk_per_lot"] == pytest.approx(275.0 * 65)
+        assert "Connect an account" in out["error"]

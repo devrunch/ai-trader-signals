@@ -19,7 +19,7 @@ from app.market.providers.deriv_provider import deriv_symbol_for
 
 logger = logging.getLogger(__name__)
 
-_KITE_EXCHANGES = {"NSE", "BSE", "MCX"}
+_KITE_EXCHANGES = {"NSE", "BSE", "MCX", "NFO"}
 _DERIV_EXCHANGES = {"FOREX"}
 
 
