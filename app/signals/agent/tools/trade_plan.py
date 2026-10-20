@@ -21,14 +21,14 @@ recommendation.
 
 `long_only` is the one gate deliberately not run. It exists because the
 built-in paper account cannot short, not because a short is bad analysis — so
-a SELL is computed and carries `executable_here: False` instead of vanishing.
+a SELL is computed and flagged `short: True` instead of vanishing.
 """
 from __future__ import annotations
 
 import logging
 from typing import Any
 
-from app.signals import analysis, validation
+from app.signals import analysis, confluence, validation
 from app.signals import indicators as ind_mod
 from app.market.contract import AssetClass
 from app.market import symbols as symbol_registry
@@ -217,6 +217,10 @@ async def propose_trade(ctx: ToolContext, args: dict) -> Any:
 
     gates = _gates(direction, entry, target, stop, indicators, atr, ltp, ctx.settings)
     failed = [g for g in gates if not g["passed"]]
+    # Every vote, not just the percentage. Asked which indicators disagreed,
+    # the agent used to paraphrase the chart because the gate told it only a
+    # ratio.
+    panel = confluence.measure(direction, indicators).to_dict()
 
     exchange = str(args.get("exchange") or ctx.exchange).upper()
     asset_class, spec = _contract(symbol, exchange)
@@ -251,6 +255,7 @@ async def propose_trade(ctx: ToolContext, args: dict) -> Any:
         "nearest_levels": {"below": [_round(symbol, v) for v in below[:3]],
                            "above": [_round(symbol, v) for v in above[:3]]},
         "gates": gates,
+        "confluence": panel,
         "position_size": sizing,
         "regime": {"adx": indicators.get("adx"), "rsi": indicators.get("rsi"),
                    "supertrend_dir": indicators.get("supertrend_dir"),
@@ -281,11 +286,10 @@ async def propose_trade(ctx: ToolContext, args: dict) -> Any:
         return out
 
     if direction == "SELL":
-        # Said plainly rather than letting the gate delete the answer: the
-        # paper account cannot short, the user's own broker can.
-        out["executable_here"] = False
-        out["executable_note"] = ("The built-in paper account is long-only. This short is "
-                                  "analysis — place it at your broker if you take it.")
+        # Said as a fact about the instrument, not about the user. The earlier
+        # wording named the paper account and their broker, which is the
+        # commentary this tool exists to stop making.
+        out["short"] = True
 
     if failed:
         out["rejected_because"] = [g["detail"] for g in failed]

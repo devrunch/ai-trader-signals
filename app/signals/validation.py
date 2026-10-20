@@ -21,6 +21,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from app.signals import confluence
+
 Result = tuple[bool, str | None]
 
 OK: Result = (True, None)
@@ -90,35 +92,24 @@ def entry_drift(entry: float, ltp: float, atr: float, max_drift_atr: float) -> R
 
 
 def quant_confluence(direction: str, indicators: Mapping[str, Any], min_ratio: float) -> Result:
-    """The LLM's chosen direction must actually agree with a majority of the
-    rule-based indicators it was given, not just narrate around them.
+    """The chosen direction must actually agree with the indicator panel, not
+    just be narrated around it.
 
-    Backtesting confirmed the LLM's free-form call alone doesn't beat noise;
-    require real technical agreement. Fails closed when no indicator can vote —
+    Backtesting confirmed the LLM's free-form call alone does not beat noise;
+    real technical agreement is required. Fails closed when nothing can vote —
     that is no confirmation at all, not unanimous confirmation.
+
+    The panel moved to `app/signals/confluence.py`. It used to be four
+    indicators, three of which were the same reading of trend, which gave five
+    possible scores and made any 2-2 split a permanent no-trade in both
+    directions. The reason string now names what disagreed, because "50%" on
+    its own does not answer "which indicators".
     """
-    wants_buy = direction == "BUY"
-    votes = 0
-    total = 0
-
-    if indicators.get("ema20") is not None and indicators.get("ema50") is not None:
-        total += 1
-        votes += 1 if (indicators["ema20"] > indicators["ema50"]) == wants_buy else 0
-    if indicators.get("supertrend_dir") is not None:
-        total += 1
-        votes += 1 if (indicators["supertrend_dir"] == 1) == wants_buy else 0
-    if indicators.get("macd") is not None and indicators.get("macd_signal") is not None:
-        total += 1
-        votes += 1 if (indicators["macd"] > indicators["macd_signal"]) == wants_buy else 0
-    if indicators.get("rsi") is not None:
-        total += 1
-        votes += 1 if (indicators["rsi"] > 50) == wants_buy else 0
-
-    if total == 0:
+    report = confluence.measure(direction, indicators)
+    if not report.votes:
         return False, "no indicators available to confirm direction"
-    ratio = votes / total
-    if ratio < min_ratio:
-        return False, f"quant confluence {ratio * 100:.0f}% < {min_ratio * 100:.0f}%"
+    if report.ratio / 100.0 < min_ratio:
+        return False, f"confluence {report.summary()} < {min_ratio * 100:.0f}%"
     return OK
 
 

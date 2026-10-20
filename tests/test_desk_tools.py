@@ -282,11 +282,15 @@ class TestTradeGeometry:
     @pytest.mark.asyncio
     async def test_a_short_is_computed_and_flagged_rather_than_deleted(self):
         """long_only exists because the paper account cannot short, not
-        because a short is bad analysis."""
+        because a short is bad analysis. The flag is a fact about the trade —
+        the old wording named the user's paper account and their broker, which
+        is the commentary this tool exists to stop making."""
         out = await self._propose("SELL")
-        assert out["executable_here"] is False
-        assert "broker" in out["executable_note"]
+        assert out["short"] is True
         assert out["reward_risk"] is not None
+        blob = repr(out).lower()
+        for word in ("account", "broker", "afford", "capital"):
+            assert word not in blob, word
 
     @pytest.mark.asyncio
     async def test_it_refuses_a_direction_it_was_not_given(self):
@@ -441,3 +445,14 @@ class TestTradeCardPlumbing:
         out = await box.execute("propose_trade", {"direction": "MAYBE", "interval": "1d"})
         assert "error" in out
         assert "trade" not in box.results
+
+
+    @pytest.mark.asyncio
+    async def test_the_trade_carries_every_confluence_vote(self):
+        """Asked which indicators disagreed, the agent paraphrased the chart,
+        because the gate handed it a percentage and nothing else."""
+        out = await TestTradeGeometry()._propose("BUY")
+        panel = out["confluence"]
+        assert panel["votes"] and len(panel["votes"]) >= 14
+        assert set(panel["families"]) <= {"trend", "momentum", "location"}
+        assert "agreed" in panel and "disagreed" in panel
