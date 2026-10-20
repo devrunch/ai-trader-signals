@@ -40,6 +40,13 @@ _FALLBACK_TARGET_R = 2.0
 # Structural stops sit just beyond the level, not on it: price wicks through a
 # level and recovers constantly, and a stop exactly on it is a donation.
 _STRUCTURE_BUFFER_ATR = 0.15
+# The ATR floor is placed a hair beyond the minimum, never exactly on it.
+# `stop_size` recomputes abs(entry - stop) and compares it to atr * min_mult;
+# at Nifty's scale that round trip loses ~1e-10, so a stop sitting precisely on
+# the boundary failed the gate that had just produced it ("stop 274.86 tighter
+# than 1.0x ATR (274.86)"). Placing a stop at exactly the minimum allowed is
+# fragile anyway -- no desk does that either.
+_FLOOR_SLACK = 1.002
 
 
 def _round(symbol: str, value: float) -> float:
@@ -70,7 +77,8 @@ def _geometry(direction: str, entry: float, atr: float, below: list[float],
     buffer = atr * _STRUCTURE_BUFFER_ATR
     long_side = direction == "BUY"
 
-    atr_stop = entry - atr * min_mult if long_side else entry + atr * min_mult
+    floor = atr * min_mult * _FLOOR_SLACK
+    atr_stop = entry - floor if long_side else entry + floor
     structural = (below[0] - buffer) if (long_side and below) else \
                  (above[0] + buffer) if (not long_side and above) else None
 
@@ -79,7 +87,8 @@ def _geometry(direction: str, entry: float, atr: float, below: list[float],
 
     # Cap at the outer ATR multiple: a stop beyond it is not caution, it is a
     # position too small to matter or a loss too big to take.
-    far = entry - atr * max_mult if long_side else entry + atr * max_mult
+    ceiling = atr * max_mult / _FLOOR_SLACK
+    far = entry - ceiling if long_side else entry + ceiling
     capped = (stop < far) if long_side else (stop > far)
     if capped:
         stop = far

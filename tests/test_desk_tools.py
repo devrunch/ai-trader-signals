@@ -214,3 +214,88 @@ class TestRegistration:
         from app.signals.agent.events import _TOOL_LABELS
         for name in ("get_events", "get_event_reactions", "get_news", "get_fundamentals"):
             assert _TOOL_LABELS.get(name), f"{name} has no label"
+
+
+class TestTradeGeometry:
+    """The gate that rejected its own output.
+
+    `_geometry` placed the stop at exactly `atr * min_multiple`, then
+    `stop_size` recomputed `abs(entry - stop)` and compared it back. At Nifty's
+    scale that round trip loses about 1e-10, so the stop the tool had just
+    produced was "tighter than 1.0x ATR" than itself:
+
+        stop 274.86 tighter than 1.0x ATR (274.86)
+    """
+
+    @staticmethod
+    def _frame(rows=120, price=22888.95, swing=300.0):
+        import numpy as np
+        import pandas as pd
+        rng = np.random.default_rng(3)
+        idx = pd.date_range("2026-01-01", periods=rows, freq="1D")
+        closes = price + np.cumsum(rng.normal(0, swing / 8, rows))
+        return pd.DataFrame({
+            "open": closes + rng.normal(0, swing / 20, rows),
+            "high": closes + abs(rng.normal(swing / 3, swing / 10, rows)),
+            "low": closes - abs(rng.normal(swing / 3, swing / 10, rows)),
+            "close": closes,
+            "volume": rng.integers(1_000, 9_000, rows).astype(float),
+        }, index=idx)
+
+    async def _propose(self, direction, **args):
+        from app.signals.agent.toolbox import AgentToolbox
+        frame = self._frame()
+        box = AgentToolbox("^NSEI", "NSE", frame, None)
+        return await box.execute("propose_trade", {"direction": direction,
+                                                   "interval": "1d", **args})
+
+    @pytest.mark.asyncio
+    async def test_the_stop_it_places_never_fails_its_own_size_gate(self):
+        for direction in ("BUY", "SELL"):
+            out = await self._propose(direction)
+            failed = [g for g in out["gates"] if g["gate"] == "stop_size" and not g["passed"]]
+            assert not failed, f"{direction}: {failed}"
+
+    @pytest.mark.asyncio
+    async def test_the_stop_sits_inside_the_allowed_atr_band(self):
+        for direction in ("BUY", "SELL"):
+            out = await self._propose(direction)
+            assert 1.0 <= out["stop_in_atr"] <= 3.5, (direction, out["stop_in_atr"])
+
+    @pytest.mark.asyncio
+    async def test_the_stop_is_on_the_losing_side_of_the_entry(self):
+        buy = await self._propose("BUY")
+        assert buy["stop"] < buy["entry"] < buy["target"]
+        sell = await self._propose("SELL")
+        assert sell["stop"] > sell["entry"] > sell["target"]
+
+    @pytest.mark.asyncio
+    async def test_a_rejected_setup_says_which_gate_and_what_would_pass(self):
+        """A wall that says "no" teaches the agent nothing. It guessed before,
+        and guessing produced the numbers this tool exists to replace."""
+        out = await self._propose("BUY", entry=22888.95)
+        if out["verdict"] == "rejected":
+            assert out["rejected_because"]
+            if any(g["gate"] == "reward_risk" and not g["passed"] for g in out["gates"]):
+                assert out["to_make_it_work"]["target_for_min_rr"]
+
+    @pytest.mark.asyncio
+    async def test_a_short_is_computed_and_flagged_rather_than_deleted(self):
+        """long_only exists because the paper account cannot short, not
+        because a short is bad analysis."""
+        out = await self._propose("SELL")
+        assert out["executable_here"] is False
+        assert "broker" in out["executable_note"]
+        assert out["reward_risk"] is not None
+
+    @pytest.mark.asyncio
+    async def test_it_refuses_a_direction_it_was_not_given(self):
+        out = await self._propose("MAYBE")
+        assert "error" in out and "BUY or SELL" in out["error"]
+
+    @pytest.mark.asyncio
+    async def test_every_number_the_model_may_quote_is_computed_here(self):
+        out = await self._propose("BUY")
+        for key in ("entry", "stop", "target", "risk_per_unit", "reward_per_unit",
+                    "reward_risk", "atr", "stop_in_atr", "how_stop_was_placed"):
+            assert out.get(key) is not None, key
