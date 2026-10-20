@@ -456,3 +456,14 @@ class TestTradeCardPlumbing:
         assert panel["votes"] and len(panel["votes"]) >= 14
         assert set(panel["families"]) <= {"trend", "momentum", "location"}
         assert "agreed" in panel and "disagreed" in panel
+
+    def test_the_agent_knows_its_own_confluence_gate(self):
+        """Asked "what are the metrics of your confluence?", it answered "I
+        don't have a specific confluence or set of metrics that I track" and
+        called no tools — while a 17-indicator gate was deciding every trade
+        it proposed."""
+        p = self._prompt()
+        assert "confluence gate" in p
+        assert "never say you have no such metric" in p
+        for family in ("trend", "momentum", "location"):
+            assert family in p
