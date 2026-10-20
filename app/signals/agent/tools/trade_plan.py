@@ -42,6 +42,12 @@ _FALLBACK_TARGET_R = 2.0
 # Structural stops sit just beyond the level, not on it: price wicks through a
 # level and recovers constantly, and a stop exactly on it is a donation.
 _STRUCTURE_BUFFER_ATR = 0.15
+# Where the built-in paper account can actually place an order. Everywhere
+# else its balance is simulated money with no bearing on the trade: sizing an
+# NFO contract against it produced "your 1,00,000 account is too small for
+# Nifty futures, build capital first" — real advice from a number that is not
+# the user's. Matches TRADABLE_EXCHANGES in the terminal and the API.
+_PAPER_EXCHANGES = frozenset({"NSE", "BSE"})
 # The ATR floor is placed a hair beyond the minimum, never exactly on it.
 # `stop_size` recomputes abs(entry - stop) and compares it to atr * min_mult;
 # at Nifty's scale that round trip loses ~1e-10, so a stop sitting precisely on
@@ -75,17 +81,21 @@ def _contract(symbol: str, exchange: str) -> tuple[AssetClass | None, dict | Non
 
 
 def _lot_sizing(entry: float, risk_per_unit: float, lot_size: int, book: dict,
-                risk_pct: float, settings) -> dict:
+                risk_pct: float, settings, *, account_value: float | None = None,
+                paper_tradable: bool = False) -> dict:
     """Lots, not units, and margin named as the thing we cannot see.
 
     Reporting a notional as if it were the cash required would understate what
     the broker blocks by roughly five times on an index future. Saying so is
     better than printing a number that is wrong in the dangerous direction.
+
+    The account is only consulted when it is the account this trade would
+    actually be placed in. For a derivative it is not: the paper account is
+    NSE/BSE only, so its balance is simulated money that says nothing about
+    what the user can carry at their broker. `account_value` lets a caller
+    supply the real figure; without one, this returns the risk per lot and
+    leaves the lot count to the person who knows their own capital.
     """
-    if "error" in book:
-        return book
-    pf = book.get("portfolio") or {}
-    account = pf.get("totalValue") or pf.get("initialCapital")
     risk_per_lot = risk_per_unit * lot_size
     notional_per_lot = entry * lot_size
     out = {
@@ -98,19 +108,34 @@ def _lot_sizing(entry: float, risk_per_unit: float, lot_size: int, book: dict,
                         "here, so treat notional as exposure and check margin with "
                         "your broker before sizing up."),
     }
+    account = account_value
+    if account is None and paper_tradable and "error" not in book:
+        pf = book.get("portfolio") or {}
+        account = pf.get("totalValue") or pf.get("initialCapital")
+
     if account is None:
         out["lots"] = None
-        out["error"] = "Connect an account to size this in lots."
+        out["sized_against"] = None
+        out["how_to_size"] = (
+            f"One lot risks {risk_per_lot:,.0f} at this stop. Divide the amount "
+            "you are willing to lose on this trade by that to get your lot count. "
+            "This platform's paper account is NSE/BSE only and is simulated "
+            "money, so it is not used here and says nothing about what you can "
+            "carry at your broker."
+        )
         return out
+
     risk_pct = max(settings.min_risk_pct, min(risk_pct, settings.max_risk_pct))
     budget = account * risk_pct / 100
     out["account_value"] = account
+    out["sized_against"] = "the capital you gave me" if account_value is not None         else "your paper account (simulated)"
     out["risk_budget"] = round(budget, 2)
     out["lots"] = int(budget // risk_per_lot) if risk_per_lot > 0 else 0
     if out["lots"] == 0:
         out["note"] = (f"One lot risks {risk_per_lot:,.0f} against a {budget:,.0f} "
-                       f"budget at {risk_pct}%. This contract is too large for "
-                       "this account at this stop.")
+                       f"budget at {risk_pct}%. Too large for THAT figure at this "
+                       "stop — not a judgement about the trade, and not advice "
+                       "about what you can afford.")
     return out
 
 
@@ -242,8 +267,12 @@ async def propose_trade(ctx: ToolContext, args: dict) -> Any:
     asset_class, spec = _contract(symbol, exchange)
     risk_pct = float(args.get("risk_pct") or 1.0)
     if spec and spec.get("lot_size"):
-        sizing = _lot_sizing(entry, risk, spec["lot_size"], await ctx.book(),
-                             risk_pct, ctx.settings)
+        supplied = args.get("account_value")
+        sizing = _lot_sizing(
+            entry, risk, spec["lot_size"], await ctx.book(), risk_pct, ctx.settings,
+            account_value=float(supplied) if supplied else None,
+            paper_tradable=exchange in _PAPER_EXCHANGES,
+        )
     else:
         sizing = portfolio_tools.position_size(await ctx.book(), entry, stop,
                                                risk_pct, settings=ctx.settings)
@@ -251,6 +280,10 @@ async def propose_trade(ctx: ToolContext, args: dict) -> Any:
             # Named explicitly so a lot count and a share count can never be
             # read as the same number.
             sizing.setdefault("unit", "units")
+            # And named for what it is. The agent read this balance as the
+            # user's real capital and recommended against a trade on the
+            # strength of it.
+            sizing.setdefault("sized_against", "your paper account (simulated)")
 
     out: dict[str, Any] = {
         "symbol": symbol,
@@ -319,6 +352,18 @@ async def propose_trade(ctx: ToolContext, args: dict) -> Any:
     else:
         out["note"] = ("Every gate passed. Numbers are computed here, not estimated — quote "
                        "them as given.")
+
+    # Said on every answer, not only when sizing is skipped. The balance here
+    # is a simulator's, and the agent has already turned it into "your account
+    # is too small, build capital first" — real advice from a number that is
+    # not the user's.
+    out["capital_caveat"] = (
+        "Any account figure here is this platform's PAPER account — simulated "
+        "money, not the user's broker capital. Never tell the user their "
+        "account is too small, or to build capital, on the strength of it. "
+        "Report the risk per unit or per lot and let them size against their "
+        "own capital; if they state it, pass it as account_value."
+    )
     return out
 
 

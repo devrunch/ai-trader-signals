@@ -328,28 +328,58 @@ class TestDerivativeSizing:
         assert resolve("^NSEI", "NSE").asset_class is AssetClass.INDEX
         assert resolve("GOLD1!", "MCX").asset_class is AssetClass.COMMODITY
 
-    def test_lot_sizing_reports_risk_per_lot_not_per_unit(self):
+    def test_a_derivative_is_never_sized_against_the_paper_account(self):
+        """The paper account is NSE/BSE only and holds simulated money. Sizing
+        an NFO contract against it produced "your 1,00,000 account is too small
+        for Nifty futures, build capital first" — real advice from a number
+        that is not the user's."""
         from app.signals.agent.tools.trade_plan import _lot_sizing
         from app.config import get_settings
 
-        book = {"portfolio": {"totalValue": 1_000_000, "cashBalance": 1_000_000}}
+        book = {"portfolio": {"totalValue": 100_000, "cashBalance": 100_000}}
         out = _lot_sizing(entry=22_890.0, risk_per_unit=275.0, lot_size=65,
-                          book=book, risk_pct=1.0, settings=get_settings())
-        assert out["unit"] == "lots"
+                          book=book, risk_pct=1.0, settings=get_settings(),
+                          paper_tradable=False)
+        assert out["lots"] is None
+        assert out["sized_against"] is None
+        assert "account_value" not in out
+        assert "paper account" in out["how_to_size"]
+        # It still tells them what one lot costs, so they can size themselves.
         assert out["risk_per_lot"] == pytest.approx(275.0 * 65)
-        assert out["notional_per_lot"] == pytest.approx(22_890.0 * 65)
-        # 1% of 10,00,000 is 10,000; one lot risks 17,875 — too big.
-        assert out["lots"] == 0
-        assert "too large for this account" in out["note"]
 
-    def test_a_big_enough_account_gets_lots(self):
+    def test_real_capital_the_user_states_is_used(self):
+        from app.signals.agent.tools.trade_plan import _lot_sizing
+        from app.config import get_settings
+
+        out = _lot_sizing(22_890.0, 275.0, 65, {"portfolio": {}}, 1.0, get_settings(),
+                          account_value=10_000_000)
+        assert out["lots"] == int(100_000 // (275.0 * 65))
+        assert out["sized_against"] == "the capital you gave me"
+
+    def test_an_nse_equity_may_use_the_paper_account_but_it_is_labelled(self):
+        """There the paper account IS the account the order would be placed
+        in — but it must still be named as simulated."""
         from app.signals.agent.tools.trade_plan import _lot_sizing
         from app.config import get_settings
 
         book = {"portfolio": {"totalValue": 10_000_000, "cashBalance": 10_000_000}}
-        out = _lot_sizing(entry=22_890.0, risk_per_unit=275.0, lot_size=65,
-                          book=book, risk_pct=1.0, settings=get_settings())
+        out = _lot_sizing(22_890.0, 275.0, 65, book, 1.0, get_settings(),
+                          paper_tradable=True)
         assert out["lots"] == int(100_000 // (275.0 * 65))
+        assert "simulated" in out["sized_against"]
+
+    def test_a_lot_count_of_zero_is_not_a_verdict_on_the_trade(self):
+        """"Too large for that figure" is arithmetic. "Your account is too
+        small, build capital first" is advice, and it was being given off a
+        simulator's balance."""
+        from app.signals.agent.tools.trade_plan import _lot_sizing
+        from app.config import get_settings
+
+        out = _lot_sizing(22_890.0, 275.0, 65, {"portfolio": {}}, 1.0, get_settings(),
+                          account_value=100_000)
+        assert out["lots"] == 0
+        assert "not a judgement about the trade" in out["note"]
+        assert "afford" in out["note"]
 
     def test_margin_is_named_as_the_thing_we_cannot_see(self):
         """Reporting notional as if it were the cash required understates what
@@ -361,11 +391,23 @@ class TestDerivativeSizing:
         assert "margin" in out["margin_note"].lower()
         assert "not notional" in out["margin_note"]
 
-    def test_no_account_gives_geometry_without_a_lot_count(self):
+    def test_no_capital_at_all_still_gives_the_geometry(self):
         from app.signals.agent.tools.trade_plan import _lot_sizing
         from app.config import get_settings
 
         out = _lot_sizing(22_890.0, 275.0, 65, {"portfolio": {}}, 1.0, get_settings())
         assert out["lots"] is None
         assert out["risk_per_lot"] == pytest.approx(275.0 * 65)
-        assert "Connect an account" in out["error"]
+        assert out["notional_per_lot"] == pytest.approx(22_890.0 * 65)
+
+    def test_every_answer_warns_that_the_balance_is_simulated(self):
+        """Carried on the result itself, not only when sizing is skipped: the
+        agent read the paper balance as real capital and advised from it."""
+        import asyncio
+        from app.signals.agent.toolbox import AgentToolbox
+        frame = TestTradeGeometry._frame()
+        box = AgentToolbox("^NSEI", "NSE", frame, None)
+        out = asyncio.get_event_loop().run_until_complete(
+            box.execute("propose_trade", {"direction": "BUY", "interval": "1d"}))
+        assert "PAPER" in out["capital_caveat"]
+        assert "build capital" in out["capital_caveat"]
