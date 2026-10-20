@@ -411,3 +411,38 @@ class TestDerivativeSizing:
             box.execute("propose_trade", {"direction": "BUY", "interval": "1d"}))
         assert "PAPER" in out["capital_caveat"]
         assert "build capital" in out["capital_caveat"]
+
+
+class TestAnswerShape:
+    """A trader reads on a phone, between candles.
+
+    The prompt said "be concise" and gave no shape, so the model produced a
+    markdown report: Analysis Summary, Trade Analysis, Critical Constraints,
+    Alternatives, Key Levels, Bottom Line. Correct, and nobody reads it.
+    """
+
+    @staticmethod
+    def _prompt():
+        from app.signals.prompts import chat_system_prompt
+        return chat_system_prompt("NIFTY1!", "NFO", 22895.2)
+
+    def test_the_first_line_is_the_verdict(self):
+        p = self._prompt()
+        assert "FIRST LINE is the answer" in p
+        assert "no restating the question" in p
+
+    def test_report_furniture_is_named_and_banned(self):
+        """Named explicitly, because the model produced every one of these."""
+        p = self._prompt()
+        for banned in ("Analysis Summary", "Bottom Line", "Key Levels", "'##' headings"):
+            assert banned in p, banned
+
+    def test_it_says_when_to_expand(self):
+        """A blanket "be short" makes it unhelpful on "why?" — the length has
+        to follow the question."""
+        p = self._prompt()
+        assert "'Why?' earns a paragraph" in p
+
+    def test_the_numbers_line_is_shown_not_described(self):
+        p = self._prompt()
+        assert "Entry 22,894 | Stop 22,806" in p
