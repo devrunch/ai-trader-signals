@@ -55,6 +55,34 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "propose_trade",
+            "description": (
+                "Cost and check a trade in ONE direction. You supply the intent — BUY or "
+                "SELL, and optionally the level you want to trade from. The entry, stop, "
+                "target, reward:risk and position size are computed here and checked "
+                "against the same gates the signal engine enforces. ALWAYS use this "
+                "instead of writing a setup yourself: your own arithmetic has been wrong. "
+                "Quote the numbers exactly as returned. If the verdict is 'rejected', say "
+                "the trade is not recommended and why — do not present it as a "
+                "suggestion. Call it once per direction you are seriously considering, not "
+                "once for each so you can offer both."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "direction": {"type": "string", "enum": ["BUY", "SELL"]},
+                    "symbol": {"type": "string", "description": "Defaults to the chart symbol"},
+                    "interval": {"type": "string", "enum": ["5m", "15m", "1h", "1d"]},
+                    "entry": {"type": "number", "description": "Omit to use the last price"},
+                    "risk_pct": {"type": "number", "description": "Account risk per trade, default 1.0"},
+                },
+                "required": ["direction"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_events",
             "description": (
                 "Scheduled economic releases that can move this instrument, with each "

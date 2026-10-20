@@ -93,6 +93,7 @@ _TOOL_LABELS: dict[str, str] = {
     "get_event_reactions": "Measuring past reactions to this release",
     "get_news": "Reading the news feed",
     "get_fundamentals": "Reading the balance sheet",
+    "propose_trade": "Costing the trade",
     "list_chart_indicators": "Checking what's on the chart",
     "set_indicator_params": "Adjusting indicator settings",
     "edit_indicator_source": "Rewriting the indicator",
