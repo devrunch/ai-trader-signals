@@ -82,6 +82,13 @@ class MarketDataRouter:
         # KiteProvider's own MCX handling (_ensure_instruments, _resolve_row,
         # the "GOLD1!" continuous-contract convention).
         self.providers["MCX"] = kite
+        # NSE's derivatives segment, same vendor and same instance again.
+        # Registering it here is not optional decoration: symbols.resolve()
+        # naming kite as the provider is not enough, because the exchange-keyed
+        # lookup below is what the historical path actually reads — without
+        # this entry NFO fell through to the yfinance fallback, which answered
+        # "NIFTY26OCTFUT: possibly delisted" and returned nothing.
+        self.providers["NFO"] = kite
 
         # Forex majors/minors + precious metals -- neither Kite (India-only)
         # nor yfinance (unreliable in practice for this) cover it. Free,

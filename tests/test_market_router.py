@@ -156,3 +156,25 @@ def test_the_resolved_exchange_is_what_gets_echoed_back():
 
     assert router.resolve_exchange('XAUUSD', 'NSE') == 'FOREX'
     assert router.resolve_exchange('RELIANCE', 'NSE') == 'NSE'
+
+
+def test_nfo_is_routed_to_kite_not_the_fallback():
+    """symbols.resolve() naming kite is not enough — the historical path reads
+    the exchange-keyed dict, and without an NFO entry Nifty futures fell
+    through to yfinance, which answered "possibly delisted" and returned
+    nothing."""
+    from app.market.providers.registry import market_data_router
+
+    assert "NFO" in market_data_router.providers
+    assert market_data_router.providers["NFO"] is market_data_router.providers["NSE"]
+    assert market_data_router.providers["NFO"] is not market_data_router.fallback
+
+
+def test_every_kite_routed_exchange_has_a_provider():
+    """The two lists are maintained separately, which is how NFO got into one
+    and not the other."""
+    from app.market.providers.registry import market_data_router
+    from app.market.symbols import _KITE_EXCHANGES
+
+    missing = [e for e in _KITE_EXCHANGES if e not in market_data_router.providers]
+    assert not missing, f"routed to kite but unregistered: {missing}"
