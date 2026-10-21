@@ -460,16 +460,26 @@ class KiteProvider:
 
             scored: list[tuple[int, dict]] = []
 
-            # MCX: one result per commodity (its continuous symbol, "GOLD1!"),
-            # never one per individual dated contract -- searching "gold"
-            # must not flood results with every live expiry month of the
-            # same underlying commodity. Matched against the commodity name
-            # only; the continuous symbol itself is synthetic (see
-            # _CONTINUOUS_SUFFIX) so there's no real "symbol" to match on.
-            for name in {row.get("name") for row in self._instruments.get("MCX", {}).values() if row.get("name")}:
-                score = _score_match(name, name, q, q_compact, q_spaced)
-                if score is not None:
-                    scored.append((score, {"symbol": f"{name}{_CONTINUOUS_SUFFIX}", "name": name, "exchange": "MCX"}))
+            # One result per underlying (its continuous symbol, "GOLD1!"),
+            # never one per dated contract -- searching "gold" must not flood
+            # results with every live expiry of the same commodity. Matched
+            # against the underlying's name only; the continuous symbol itself
+            # is synthetic (see _CONTINUOUS_SUFFIX) so there is no real
+            # "symbol" to match on.
+            # NFO works the same way and was missing: searching "nifty" offered
+            # the NSE indices and no futures contract at all, so a user who
+            # wanted to trade Nifty had to know to type NIFTY1! AND to switch
+            # the exchange picker off its NASDAQ default by hand. Only the
+            # underlyings that actually have futures, and one row each — NFO
+            # carries 38,563 instruments, almost all of them option strikes.
+            for exch in ("MCX", "NFO"):
+                names = {row.get("name") for row in self._instruments.get(exch, {}).values()
+                         if row.get("name") and row.get("instrument_type") == "FUT"}
+                for name in names:
+                    score = _score_match(name, name, q, q_compact, q_spaced)
+                    if score is not None:
+                        scored.append((score, {"symbol": f"{name}{_CONTINUOUS_SUFFIX}",
+                                               "name": name, "exchange": exch}))
 
             for exch in ("NSE", "BSE"):
                 for symbol, row in self._instruments.get(exch, {}).items():

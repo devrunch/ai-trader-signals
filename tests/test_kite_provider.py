@@ -644,3 +644,34 @@ class TestHistoryWindowTimezone:
         provider._ensure_instruments()
         assert provider._resolve_row("RELIANCE", "NSE") is not None
         assert provider._resolve_row("RELIANCE", "NFO") is None
+
+    def test_search_offers_nfo_futures_the_same_way_it_offers_mcx(self):
+        """Searching "nifty" returned the NSE indices and no futures contract
+        at all, so a user who wanted to trade Nifty had to know to type
+        NIFTY1! by hand AND to switch the exchange picker off its NASDAQ
+        default. NFO was loaded for charting and never added here."""
+        from datetime import date, timedelta
+
+        today = date.today()
+        provider = _provider_with_token()
+        provider._kite.instruments = _instrument_dumps(
+            NSE=[{"tradingsymbol": "NIFTY 50", "name": "NIFTY 50", "instrument_token": 1,
+                  "instrument_type": "EQ", "segment": "INDICES"}],
+            NFO=[
+                {"tradingsymbol": "NIFTY26OCTFUT", "name": "NIFTY", "instrument_token": 2,
+                 "instrument_type": "FUT", "expiry": today + timedelta(days=6)},
+                {"tradingsymbol": "NIFTY26NOVFUT", "name": "NIFTY", "instrument_token": 3,
+                 "instrument_type": "FUT", "expiry": today + timedelta(days=33)},
+                # An option strike must never become a search result: NFO
+                # carries tens of thousands of them.
+                {"tradingsymbol": "NIFTY26OCT22900CE", "name": "NIFTY", "instrument_token": 4,
+                 "instrument_type": "CE", "expiry": today + timedelta(days=6)},
+            ],
+        )
+
+        results = provider._search_sync("nifty", limit=8)
+        nfo = [r for r in results if r["exchange"] == "NFO"]
+
+        assert len(nfo) == 1, "one row per underlying, not one per contract"
+        assert nfo[0]["symbol"] == "NIFTY1!"
+        assert any(r["exchange"] == "NSE" for r in results), "the index is still offered"
