@@ -257,11 +257,19 @@ class KiteProvider:
         every call rather than cached as a decision."""
         exch = exchange.upper()
         sym = kite_symbol(symbol)
-        if exch in _DATED_EXCHANGES:
-            parsed = _parse_continuous(sym)
-            if parsed:
-                name, rank = parsed
-                return self._resolve_continuous(name, rank, exch)
+        parsed = _parse_continuous(sym)
+        if parsed:
+            name, rank = parsed
+            # A "1!" symbol can only mean a futures contract, so the exchange
+            # the caller happened to pass does not decide whether it resolves.
+            # Asked for a Nifty trade the agent sent NIFTY1! with exchange NSE
+            # — the chart's exchange, not the contract's — and every timeframe
+            # came back empty, which it reported as "no data available".
+            for venue in (exch, *(_DATED_EXCHANGES - {exch})):
+                row = self._resolve_continuous(name, rank, venue)
+                if row is not None:
+                    return row
+            return None
         return self._instruments.get(exch, {}).get(sym)
 
     def contract_spec(self, symbol: str, exchange: str) -> dict[str, Any] | None:

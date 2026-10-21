@@ -606,3 +606,41 @@ class TestHistoryWindowTimezone:
 
         bar = to_bars(provider._get_historical_df_sync("NIFTY 50", "NSE", "1m", 1))[0]
         assert datetime.fromtimestamp(bar["time"], timezone.utc) == opened.astimezone(timezone.utc)
+
+    def test_a_continuous_symbol_resolves_whatever_exchange_was_passed(self):
+        """A "1!" symbol can only mean a futures contract, so the exchange the
+        caller happened to send should not decide whether it resolves.
+
+        Asked for a Nifty trade, the agent sent NIFTY1! with exchange NSE —
+        the chart's exchange, not the contract's — and every timeframe came
+        back empty. It reported that as "no data available for analysis",
+        which reads as a broken feed rather than a mislabelled request.
+        """
+        from datetime import date, timedelta
+
+        today = date.today()
+        provider = _provider_with_token()
+        provider._kite.instruments = _instrument_dumps(NFO=[
+            {"tradingsymbol": "NIFTY26OCTFUT", "name": "NIFTY", "instrument_token": 1,
+             "instrument_type": "FUT", "expiry": today + timedelta(days=6), "lot_size": 65},
+            {"tradingsymbol": "NIFTY26NOVFUT", "name": "NIFTY", "instrument_token": 2,
+             "instrument_type": "FUT", "expiry": today + timedelta(days=33), "lot_size": 65},
+        ])
+        provider._ensure_instruments()
+
+        for exchange in ("NFO", "NSE"):
+            row = provider._resolve_row("NIFTY1!", exchange)
+            assert row is not None, exchange
+            assert row["tradingsymbol"] == "NIFTY26OCTFUT"
+
+    def test_a_plain_symbol_is_still_only_looked_up_where_it_was_asked_for(self):
+        """The fallback is for continuous contracts only. An equity must not
+        start resolving against the derivatives segment."""
+        provider = _provider_with_token()
+        provider._kite.instruments = _instrument_dumps(NSE=[
+            {"tradingsymbol": "RELIANCE", "name": "RELIANCE", "instrument_token": 9,
+             "instrument_type": "EQ"},
+        ])
+        provider._ensure_instruments()
+        assert provider._resolve_row("RELIANCE", "NSE") is not None
+        assert provider._resolve_row("RELIANCE", "NFO") is None

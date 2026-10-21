@@ -353,7 +353,17 @@ async def propose_trade(ctx: ToolContext, args: dict) -> Any:
     interval = str(args.get("interval") or BASE_INTERVAL)
     df = await ctx.frame(args.get("symbol"), interval)
     if df is None or len(df) < 60:
-        return {"error": f"Not enough {interval} history for {symbol} to size a trade."}
+        # Said precisely, because the agent read the old wording as a broken
+        # feed and told the user to "check data connectivity". A futures
+        # contract is born a few months before expiry, so 58 daily bars is
+        # normal and the intraday frames are full.
+        have = 0 if df is None else len(df)
+        shorter = {"1d": "1h", "1h": "15m", "15m": "5m"}.get(interval)
+        hint = (f" Try interval {shorter} — a contract this young has far more "
+                f"intraday history than daily." if shorter and have else
+                " The instrument may not be listed on that exchange.")
+        return {"error": f"{symbol} has {have} {interval} bars; 60 are needed to "
+                         f"compute indicators.{hint}"}
 
     indicators = dict(ind_mod.compute(df))
     atr = indicators.get("atr")
