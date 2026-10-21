@@ -401,7 +401,14 @@ class KiteProvider:
                 return None
 
             df = pd.DataFrame(candles).set_index("date")
-            df.index = pd.to_datetime(df.index).tz_localize(None)
+            # Kite returns IST-aware timestamps. `tz_localize(None)` on those
+            # keeps the WALL TIME and throws the offset away, so 09:15 IST
+            # became a naive 09:15 that `to_bars` then read as 09:15 UTC — and
+            # the chart drew an Indian session running 14:45 to 21:00. Convert
+            # first, so the naive value is UTC like every other provider's.
+            index = pd.to_datetime(df.index)
+            index = index.tz_convert("UTC") if index.tz is not None                 else index.tz_localize(_IST).tz_convert("UTC")
+            df.index = index.tz_localize(None)
             return df[["open", "high", "low", "close", "volume"]]
         except _VENDOR_ERRORS as e:
             logger.warning("Kite historical fetch failed for %s/%s: %s", symbol, exchange, e)

@@ -557,3 +557,52 @@ class TestHistoryWindowTimezone:
         _token, _from, to_date, _interval = provider._kite.historical_data.call_args[0]
         ist_now = datetime.now(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None)
         assert abs((to_date - ist_now).total_seconds()) < 60
+
+    def test_bars_come_back_in_utc_not_ist_wall_clock(self):
+        """Kite returns IST-aware timestamps and `tz_localize(None)` keeps the
+        wall time, throwing the offset away. A 09:15 IST open became a naive
+        09:15 that the wire then serialised as 09:15 UTC, so the chart drew an
+        Indian session running 14:45 to 21:00 — every NSE candle sat five and a
+        half hours late. Deriv's bars were already UTC; these now match."""
+        from datetime import datetime
+        from unittest.mock import MagicMock
+        from zoneinfo import ZoneInfo
+
+        ist = ZoneInfo("Asia/Kolkata")
+        provider = _provider_with_token()
+        provider._kite.instruments = _instrument_dumps(NSE=[
+            {"tradingsymbol": "NIFTY 50", "name": "NIFTY 50", "instrument_token": 256265,
+             "instrument_type": "EQ", "segment": "INDICES"},
+        ])
+        provider._kite.historical_data = MagicMock(return_value=[{
+            "date": datetime(2026, 10, 21, 9, 15, tzinfo=ist),
+            "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 0,
+        }])
+
+        df = provider._get_historical_df_sync("NIFTY 50", "NSE", "1m", 1)
+        # 09:15 IST is 03:45 UTC. Anything else and the chart is hours out.
+        assert df.index[0] == datetime(2026, 10, 21, 3, 45)
+
+    def test_the_wire_timestamp_decodes_to_the_real_moment(self):
+        """The whole point: to_bars calls .timestamp() on a naive index, which
+        Python reads as the box's local time. The box is UTC, so the index has
+        to be UTC for the epoch to mean anything."""
+        from datetime import datetime, timezone
+        from unittest.mock import MagicMock
+        from zoneinfo import ZoneInfo
+
+        from app.market.bars import to_bars
+
+        ist = ZoneInfo("Asia/Kolkata")
+        provider = _provider_with_token()
+        provider._kite.instruments = _instrument_dumps(NSE=[
+            {"tradingsymbol": "NIFTY 50", "name": "NIFTY 50", "instrument_token": 256265,
+             "instrument_type": "EQ", "segment": "INDICES"},
+        ])
+        opened = datetime(2026, 10, 21, 9, 15, tzinfo=ist)
+        provider._kite.historical_data = MagicMock(return_value=[{
+            "date": opened, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 0,
+        }])
+
+        bar = to_bars(provider._get_historical_df_sync("NIFTY 50", "NSE", "1m", 1))[0]
+        assert datetime.fromtimestamp(bar["time"], timezone.utc) == opened.astimezone(timezone.utc)
