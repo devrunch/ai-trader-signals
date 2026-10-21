@@ -18,6 +18,7 @@ import logging
 import re
 import time
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 from functools import partial
 from typing import Any
 
@@ -80,6 +81,20 @@ def _parse_continuous(symbol: str) -> tuple[str, int] | None:
 def kite_symbol(symbol: str) -> str:
     """The tradingsymbol Kite's own instrument dump actually uses."""
     return _INDEX_ALIASES.get(symbol.upper(), symbol.upper())
+
+
+# Kite reads a naive datetime as IST. This box runs UTC, so `datetime.now()`
+# handed it a wall-clock 5.5 hours behind: every history window ended five and
+# a half hours early, and during Indian market hours that cut off the whole of
+# the current session — the chart showed Friday's close on a Wednesday
+# afternoon. Confirmed live: the same call with a UTC-naive `now` returned its
+# last candle at 19 Oct 15:29, and with an IST-naive `now` at 21 Oct 14:27.
+_IST = ZoneInfo("Asia/Kolkata")
+
+
+def _ist_now() -> datetime:
+    """Wall-clock time in Mumbai, naive — the shape Kite's API expects."""
+    return datetime.now(_IST).replace(tzinfo=None)
 
 
 def _as_date(value: Any) -> date:
@@ -375,7 +390,7 @@ class KiteProvider:
             if row is None:
                 return None
 
-            to_date = datetime.now()
+            to_date = _ist_now()
             from_date = to_date - timedelta(days=clamp_days(interval, days))
             kite_interval = _INTERVAL_MAP.get(interval, "15minute")
 

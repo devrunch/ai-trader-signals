@@ -509,3 +509,51 @@ async def test_async_methods_wrap_the_sync_ones():
 
     result = await provider.get_quote("TCS", "NSE")
     assert result["ltp"] == 100.0
+
+
+class TestHistoryWindowTimezone:
+    """Kite reads a naive datetime as IST.
+
+    The box runs UTC, so `datetime.now()` handed it a wall-clock 5.5 hours
+    behind and every history window ended five and a half hours early. During
+    Indian market hours that cut off the whole of the current session: the
+    chart showed Friday's close on a Wednesday afternoon, which read as a gap
+    in the data rather than a bug in the request.
+
+    Confirmed live before this was written — the same call returned its last
+    candle at 19 Oct 15:29 with a UTC-naive `now`, and at 21 Oct 14:27 with an
+    IST-naive one.
+    """
+
+    def test_the_window_ends_at_mumbai_wall_clock_not_the_box_clock(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        from app.market.providers.kite_provider import _ist_now
+
+        expected = datetime.now(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None)
+        got = _ist_now()
+        assert abs((got - expected).total_seconds()) < 5
+
+    def test_it_is_naive_because_that_is_what_kite_expects(self):
+        from app.market.providers.kite_provider import _ist_now
+        assert _ist_now().tzinfo is None
+
+    def test_history_asks_for_a_window_ending_now_in_ist(self):
+        """The regression guard: a provider built with a UTC box clock would
+        request a window ending before the session it is being asked about."""
+        from datetime import datetime
+        from unittest.mock import MagicMock
+        from zoneinfo import ZoneInfo
+
+        provider = _provider_with_token()
+        provider._kite.instruments = _instrument_dumps(NSE=[
+            {"tradingsymbol": "NIFTY 50", "name": "NIFTY 50", "instrument_token": 256265,
+             "instrument_type": "EQ", "segment": "INDICES"},
+        ])
+        provider._kite.historical_data = MagicMock(return_value=[])
+        provider._get_historical_df_sync("NIFTY 50", "NSE", "1m", 2)
+
+        _token, _from, to_date, _interval = provider._kite.historical_data.call_args[0]
+        ist_now = datetime.now(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None)
+        assert abs((to_date - ist_now).total_seconds()) < 60
