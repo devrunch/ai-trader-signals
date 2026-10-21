@@ -97,6 +97,14 @@ def _ist_now() -> datetime:
     return datetime.now(_IST).replace(tzinfo=None)
 
 
+def _is_index(row: dict[str, Any] | None) -> bool:
+    """An index is a published number, not an instrument: nobody can trade it,
+    so it has no volume. Kite still fills the field with 0, which reads as
+    "nothing traded today" and is a different claim from "there is nothing to
+    count"."""
+    return bool(row) and row.get("segment") == "INDICES"
+
+
 def _as_date(value: Any) -> date:
     """Kite's real SDK returns `expiry` as a `datetime.date` already, but
     the mock fixtures used in tests (and conceivably a future SDK version)
@@ -365,7 +373,12 @@ class KiteProvider:
                 "high": float(ohlc["high"]),
                 "low": float(ohlc["low"]),
                 "prev_close": round(prev_close, 4),
-                "volume": data.get("volume"),
+                # An index quote carries a 0 here for the same reason the
+                # historical rows do -- see _is_index. Resolved off the
+                # already-cached dump, so no extra fetch on the common path;
+                # an unresolved symbol keeps whatever the feed said.
+                "volume": None if _is_index(self._resolve_row(symbol, exchange))
+                else data.get("volume"),
                 "bid": bid,
                 "ask": ask,
                 "spread": round(ask - bid, 4) if bid is not None and ask is not None else None,
@@ -417,7 +430,13 @@ class KiteProvider:
             index = pd.to_datetime(df.index)
             index = index.tz_convert("UTC") if index.tz is not None                 else index.tz_localize(_IST).tz_convert("UTC")
             df.index = index.tz_localize(None)
-            return df[["open", "high", "low", "close", "volume"]]
+            df = df[["open", "high", "low", "close", "volume"]]
+            if _is_index(row):
+                # Nothing trades in an index, so Kite's 0 is a placeholder, not
+                # a count. Passed through it drew a flat zero histogram under
+                # NIFTY 50 and told the indicators volume collapsed to nothing.
+                df = df.assign(volume=float("nan"))
+            return df
         except _VENDOR_ERRORS as e:
             logger.warning("Kite historical fetch failed for %s/%s: %s", symbol, exchange, e)
             return None

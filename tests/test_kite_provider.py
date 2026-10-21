@@ -175,6 +175,44 @@ class TestGetHistoricalDf:
         called_interval = provider._kite.historical_data.call_args[0][3]
         assert called_interval == "30minute"
 
+    def test_an_index_reports_no_volume_rather_than_kites_placeholder_zero(self):
+        """Nobody trades NIFTY 50, so Kite's 0 counts nothing -- passed
+        through it drew a flat zero histogram under the chart and told the
+        indicators volume had collapsed."""
+        provider = _provider_with_token()
+        provider._instruments = {
+            "NSE": {"NIFTY 50": {"tradingsymbol": "NIFTY 50", "instrument_token": 256265,
+                                 "segment": "INDICES", "instrument_type": "EQ"}},
+            "BSE": {},
+        }
+        provider._instruments_loaded_at = provider._now()
+        provider._kite.historical_data = MagicMock(return_value=[
+            {"date": pd.Timestamp("2026-10-21 09:15"), "open": 22700.0, "high": 22740.0,
+             "low": 22690.0, "close": 22730.0, "volume": 0},
+        ])
+
+        df = provider._get_historical_df_sync("NIFTY 50", "NSE", "1m", 1)
+
+        assert df["volume"].isna().all()
+
+    def test_a_tradeable_symbols_zero_volume_is_still_a_count(self):
+        """A session where nothing traded is a fact about the market. Only an
+        index has nothing to count."""
+        provider = _provider_with_token()
+        provider._instruments = {
+            "NSE": {r["tradingsymbol"]: r for r in NSE_INSTRUMENTS if r["instrument_type"] == "EQ"},
+            "BSE": {},
+        }
+        provider._instruments_loaded_at = provider._now()
+        provider._kite.historical_data = MagicMock(return_value=[
+            {"date": pd.Timestamp("2026-10-21 09:15"), "open": 1265.0, "high": 1265.0,
+             "low": 1265.0, "close": 1265.0, "volume": 0},
+        ])
+
+        df = provider._get_historical_df_sync("RELIANCE", "NSE", "1m", 1)
+
+        assert df["volume"].tolist() == [0]
+
     def test_an_unmapped_symbol_returns_none(self):
         provider = _provider_with_token()
         provider._instruments = {"NSE": {}, "BSE": {}}
