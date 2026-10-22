@@ -84,6 +84,70 @@ async def pine_run(body: PineRunBody):
     )
 
 
+class PineBatchScript(BaseModel):
+    # The caller's own id for this indicator, echoed back on the result.
+    # Results come back as a list and a dropped entry would silently shift
+    # every plot onto the wrong indicator if they were matched by position.
+    id: str
+    source: str
+    mode: Literal["indicator", "strategy"] = "indicator"
+    inputOverrides: dict[str, Any] | None = None
+
+
+class PineRunBatchBody(BaseModel):
+    bars: list[dict]
+    scripts: list[PineBatchScript]
+    symbol: str | None = None
+    exchange: str | None = None
+    interval: str | None = None
+
+
+# A chart holds a handful of indicators. Each entry costs a real sandbox run,
+# so a request asking for hundreds is a bug or an abuse, not a use case.
+MAX_BATCH_SCRIPTS = 30
+
+
+@router.post("/pine/run-batch")
+async def pine_run_batch(body: PineRunBatchBody):
+    """Run several scripts against ONE copy of the bars.
+
+    Every indicator on a chart runs against the same bars, and /pine/run made
+    the client upload them once per indicator -- on a 1m chart that is ~83 KB
+    per indicator, so ten of them sent the same payload ten times over ten
+    round trips. Measured on the box, the runs themselves are cheap and
+    linear (ten in 0.58s); the duplicate upload was the cost.
+
+    Sequential on purpose: the sandbox serialises runs anyway (see
+    pine/sandbox.py's semaphore), so running them concurrently would buy
+    nothing and hold several results in memory at once.
+    """
+    if len(body.scripts) > MAX_BATCH_SCRIPTS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{len(body.scripts)} scripts requested, limit is {MAX_BATCH_SCRIPTS}",
+        )
+    ticker_id = f"{body.exchange}:{body.symbol}" if body.symbol else None
+    symbol_info = {"symbol": body.symbol, "exchange": body.exchange} if body.symbol else None
+
+    results = []
+    for script in body.scripts:
+        try:
+            result = await run_pine_script(
+                script.source, body.bars, mode=script.mode,
+                ticker_id=ticker_id, timeframe=body.interval,
+                symbol_info=symbol_info,
+                input_overrides=script.inputOverrides,
+            )
+        except Exception as e:
+            # One script must not take the other nine with it: a batch is a
+            # convenience over N requests, and N requests would have failed
+            # one at a time.
+            logger.exception("pine batch: %s failed", script.id)
+            result = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        results.append({"id": script.id, **result})
+    return {"results": results}
+
+
 @router.post("/generate/{symbol}")
 async def generate_signal(symbol: str, exchange: str = "NSE",
                           service: SignalService = Depends(get_service)):
