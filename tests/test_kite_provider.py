@@ -112,6 +112,73 @@ class TestGetQuote:
         assert result["ask"] == 1293.1
         assert result["spread"] == pytest.approx(0.3, abs=0.001)
 
+    def test_a_continuous_symbol_is_quoted_as_its_real_contract(self):
+        """NIFTY1! went to Kite as the literal "NFO:NIFTY1!", which is not an
+        instrument: the chart drew fine off the history, which does resolve
+        it, while the header sat on "loading..." forever. Resolution was
+        gated on MCX, but a "1!" symbol means a futures contract wherever it
+        lives."""
+        provider = _provider_with_token()
+        provider._instruments = {
+            "NSE": {}, "BSE": {},
+            "NFO": {"NIFTY26OCTFUT": {
+                "tradingsymbol": "NIFTY26OCTFUT", "name": "NIFTY", "exchange": "NFO",
+                "instrument_type": "FUT", "instrument_token": 12468226,
+                "expiry": "2026-10-27", "segment": "NFO-FUT",
+            }},
+        }
+        provider._instruments_loaded_at = provider._now()
+        provider._kite.quote = MagicMock(return_value={
+            "NFO:NIFTY26OCTFUT": {
+                "last_price": 22723.1,
+                "ohlc": {"open": 22687.0, "high": 22760.0, "low": 22620.0, "close": 22715.2},
+                "volume": 15790,
+            }
+        })
+
+        result = provider._get_quote_sync("NIFTY1!", "NFO")
+
+        assert provider._kite.quote.call_args[0][0] == "NFO:NIFTY26OCTFUT"
+        assert result["ltp"] == 22723.1
+        # Echoes back what the caller asked for: the continuous symbol stays
+        # stable while the contract underneath rolls, and the frontend
+        # matches incoming ticks against the symbol it subscribed to.
+        assert result["symbol"] == "NIFTY1!"
+        assert result["exchange"] == "NFO"
+
+    def test_a_continuous_symbol_resolves_even_from_another_exchange(self):
+        """The caller passes the chart's exchange, which need not be the
+        contract's -- the agent sent NIFTY1! with NSE."""
+        provider = _provider_with_token()
+        provider._instruments = {
+            "NSE": {}, "BSE": {},
+            "NFO": {"NIFTY26OCTFUT": {
+                "tradingsymbol": "NIFTY26OCTFUT", "name": "NIFTY", "exchange": "NFO",
+                "instrument_type": "FUT", "instrument_token": 12468226,
+                "expiry": "2026-10-27", "segment": "NFO-FUT",
+            }},
+        }
+        provider._instruments_loaded_at = provider._now()
+        provider._kite.quote = MagicMock(return_value={
+            "NFO:NIFTY26OCTFUT": {
+                "last_price": 22723.1,
+                "ohlc": {"open": 22687.0, "high": 22760.0, "low": 22620.0, "close": 22715.2},
+            }
+        })
+
+        result = provider._get_quote_sync("NIFTY1!", "NSE")
+
+        assert provider._kite.quote.call_args[0][0] == "NFO:NIFTY26OCTFUT"
+        assert result["ltp"] == 22723.1
+
+    def test_an_unresolvable_continuous_symbol_returns_none(self):
+        provider = _provider_with_token()
+        provider._instruments = {"NSE": {}, "BSE": {}, "NFO": {}, "MCX": {}}
+        provider._instruments_loaded_at = provider._now()
+        provider._kite.quote = MagicMock(side_effect=AssertionError("must not ask Kite"))
+
+        assert provider._get_quote_sync("NOTREAL1!", "NFO") is None
+
     def test_a_kite_exception_returns_none_not_a_raise(self):
         from kiteconnect.exceptions import KiteException
 

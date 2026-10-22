@@ -331,8 +331,8 @@ class KiteProvider:
     def _get_quote_sync(self, symbol: str, exchange: str) -> dict | None:
         try:
             self._ensure_token()
-            # Only an MCX continuous symbol ("GOLD1!", "GOLD2!", ...) needs
-            # the instrument dump loaded at all -- every other quote (the
+            # Only a continuous symbol ("GOLD1!", "NIFTY1!", ...) needs the
+            # instrument dump loaded at all -- every other quote (the
             # overwhelming common case) keeps the existing fast, dump-free
             # path exactly as before. Kite's quote() key uses whichever real
             # dated tradingsymbol the continuous one resolves to; the
@@ -340,14 +340,24 @@ class KiteProvider:
             # actually asked for ("GOLD1!"), matching TradingView's own
             # convention of the continuous symbol staying stable while the
             # real contract underneath rolls.
+            #
+            # Not gated on MCX: a "1!" symbol means a futures contract
+            # wherever it lives, and NIFTY1! on NFO went to Kite as the
+            # literal "NFO:NIFTY1!", which is not an instrument -- the chart
+            # drew fine off the history (which does resolve it) while the
+            # header sat on "loading..." forever. The venue comes from the
+            # resolved row rather than the caller, who passes the chart's
+            # exchange and need not have the contract's.
             real_symbol = kite_symbol(symbol)
-            if exchange.upper() == "MCX" and _parse_continuous(real_symbol):
+            venue = exchange.upper()
+            if _parse_continuous(real_symbol):
                 self._ensure_instruments()
                 row = self._resolve_row(symbol, exchange)
                 if row is None:
                     return None
                 real_symbol = row["tradingsymbol"]
-            key = f"{exchange.upper()}:{real_symbol}"
+                venue = str(row.get("exchange") or venue).upper()
+            key = f"{venue}:{real_symbol}"
             data = self._kite.quote(key)[key]
             ltp = float(data["last_price"])
             ohlc = data["ohlc"]
