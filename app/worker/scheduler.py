@@ -48,6 +48,14 @@ SCHEDULE: dict[str, tuple[str, dict]] = {
 # so a long outage produces one catch-up run, not a burst of them.
 MISFIRE_GRACE_SECONDS = 900
 
+# Jobs where a skipped run is not one lost hour's work but a service that
+# stays broken until the next one. Kite's access token dies every morning and
+# this is the only thing that mints a new one, so a box that was off at 06:00
+# IST -- a stopped instance, a long outage -- came up with every Kite call
+# failing and no way back until 06:00 the next day. These run however late
+# they are; `coalesce` still collapses a long outage into a single catch-up.
+NEVER_SKIP = frozenset({"kite-session-refresh"})
+
 JOB_DEFAULTS = {
     "coalesce": True,
     # The hourly work can outrun its own interval; a second copy would
@@ -66,6 +74,9 @@ def build_scheduler(jobstore: RedisJobStore | None = None) -> AsyncIOScheduler:
         scheduler.add_job(
             func, trigger=CronTrigger(timezone=IST, **cron),
             id=job_id, name=job_id, replace_existing=True,
+            # None means no deadline, so the run happens whenever the process
+            # is next up rather than being dropped for being late.
+            misfire_grace_time=None if job_id in NEVER_SKIP else MISFIRE_GRACE_SECONDS,
         )
     return scheduler
 

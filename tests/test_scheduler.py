@@ -62,9 +62,23 @@ async def test_a_slow_run_cannot_overlap_itself():
 async def test_a_job_missed_during_a_restart_still_runs():
     # Deploys restart this process. Without a grace period, a job due during
     # the restart is dropped -- the 15:20 square-off is the one that matters.
-    for job in (await _jobs()).values():
+    for job_id, job in (await _jobs()).items():
+        if job_id in scheduler_mod.NEVER_SKIP:
+            continue
         assert job.misfire_grace_time and job.misfire_grace_time >= 300
         assert job.coalesce is True   # one catch-up run, not a burst
+
+
+async def test_the_token_refresh_runs_however_late_it_is():
+    """Kite's token dies every morning and this job is the only thing that
+    mints a new one. The box was off at 06:00 IST once and came up four hours
+    later with every Kite call failing -- the run was past its grace window,
+    so it was dropped, and nothing tried again until 06:00 the next day."""
+    jobs = await _jobs()
+    for job_id in scheduler_mod.NEVER_SKIP:
+        assert job_id in jobs, f"{job_id} is not scheduled at all"
+        assert jobs[job_id].misfire_grace_time is None   # no deadline
+        assert jobs[job_id].coalesce is True             # one catch-up, not a burst
 
 
 async def test_jobs_are_stored_as_import_paths_so_a_restart_can_resolve_them():
