@@ -38,3 +38,46 @@ def test_a_login_failure_is_logged_and_returned_not_raised():
 
     assert result["ok"] is False
     assert "bad TOTP" in result["error"]
+
+
+def test_the_store_is_retried_but_the_login_is_not():
+    """A deploy restarts this service and the API together, and this one can
+    come up first. Dropping the write after a successful login is the worst
+    outcome available: the previous token is dead -- each login invalidates
+    the one before it -- and the new one was never stored."""
+    import httpx
+    from app.market.providers import kite_auth
+
+    session = KiteSession(access_token="tok_abc", nse_instruments=[], bse_instruments=[])
+    attempts = []
+
+    def flaky_put(url, **kwargs):
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise httpx.ConnectError("Connection refused")
+        resp = MagicMock(status_code=200)
+        resp.raise_for_status = lambda: None
+        return resp
+
+    with patch("app.market.providers.kite_auth.refresh_session", return_value=session) as mock_login, \
+         patch("app.market.providers.kite_auth.httpx.put", side_effect=flaky_put), \
+         patch("app.market.providers.kite_auth.time.sleep"):
+        result = refresh_zerodha_session()
+
+    assert result["ok"] is True
+    assert len(attempts) == 3      # the write kept trying
+    mock_login.assert_called_once()  # the login did not
+
+
+def test_a_store_that_never_succeeds_is_reported_not_swallowed():
+    import httpx
+    session = KiteSession(access_token="tok_abc", nse_instruments=[], bse_instruments=[])
+
+    with patch("app.market.providers.kite_auth.refresh_session", return_value=session), \
+         patch("app.market.providers.kite_auth.httpx.put",
+               side_effect=httpx.ConnectError("Connection refused")), \
+         patch("app.market.providers.kite_auth.time.sleep"):
+        result = refresh_zerodha_session()
+
+    assert result["ok"] is False
+    assert "Connection refused" in result["error"]

@@ -19,6 +19,7 @@ day.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -126,6 +127,12 @@ def refresh_session(settings: Settings) -> KiteSession:
     return KiteSession(access_token=access_token, nse_instruments=nse, bse_instruments=bse)
 
 
+# The write is retried; the login above it is not. A deploy restarts this
+# service and the API together, and this one can come up first.
+_STORE_ATTEMPTS = 6
+_STORE_RETRY_SECONDS = 5.0
+
+
 def refresh_and_store(settings: Settings) -> dict[str, Any]:
     """Mint a session and hand it to the API, which is where every service
     reads the token from.
@@ -140,17 +147,35 @@ def refresh_and_store(settings: Settings) -> dict[str, Any]:
     except KiteAuthError as e:
         logger.error("Zerodha session refresh failed: %s", e)
         return {"ok": False, "error": str(e)}
-    try:
-        resp = httpx.put(
-            f"{settings.api_service_url}/api/internal/broker/zerodha/session",
-            headers={"x-internal-key": settings.internal_api_key},
-            json={"accessToken": session.access_token},
-            timeout=10,
-        )
-        resp.raise_for_status()
-    except httpx.HTTPError as e:
-        logger.error("Zerodha session refreshed but the API write failed: %s", e)
-        return {"ok": False, "error": str(e)}
+    # Retried, and only this half: logging in again is expensive, scripted
+    # against endpoints meant for a browser, and each login invalidates the
+    # token before it. Dropping the write after a successful login is the
+    # worst outcome available -- the old token is now dead and the new one
+    # was never stored. The API not being up yet is a real case: a deploy
+    # restarts both services, and this one can win the race.
+    url = f"{settings.api_service_url}/api/internal/broker/zerodha/session"
+    last_error: Exception | None = None
+    for attempt in range(1, _STORE_ATTEMPTS + 1):
+        try:
+            resp = httpx.put(
+                url,
+                headers={"x-internal-key": settings.internal_api_key},
+                json={"accessToken": session.access_token},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            last_error = None
+            break
+        except httpx.HTTPError as e:
+            last_error = e
+            if attempt < _STORE_ATTEMPTS:
+                logger.warning("Storing the Zerodha session failed (attempt %d/%d): %s",
+                               attempt, _STORE_ATTEMPTS, e)
+                time.sleep(_STORE_RETRY_SECONDS)
+    if last_error is not None:
+        logger.error("Zerodha session refreshed but the API write failed after %d attempts: %s",
+                     _STORE_ATTEMPTS, last_error)
+        return {"ok": False, "error": str(last_error)}
     logger.info("Zerodha session refreshed and stored (%d NSE, %d BSE instruments)",
                 len(session.nse_instruments or []), len(session.bse_instruments or []))
     return {"ok": True, "error": None}
