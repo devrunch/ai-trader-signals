@@ -253,25 +253,7 @@ def refresh_zerodha_session():
     router's Kite-then-yfinance fallback picks up every call that fails
     against it) rather than needing this task itself to retry aggressively.
     """
-    settings = get_settings()
-    try:
-        session = kite_auth.refresh_session(settings)
-    except kite_auth.KiteAuthError as e:
-        logger.error("Zerodha session refresh failed: %s", e)
-        return {"ok": False, "error": str(e)}
-
-    try:
-        resp = httpx.put(
-            f"{settings.api_service_url}/api/internal/broker/zerodha/session",
-            headers={"x-internal-key": settings.internal_api_key},
-            json={"accessToken": session.access_token},
-            timeout=10,
-        )
-        resp.raise_for_status()
-    except httpx.HTTPError as e:
-        logger.error("Zerodha session refreshed but NestJS write failed: %s", e)
-        return {"ok": False, "error": str(e)}
-
-    logger.info("Zerodha session refreshed and stored (%d NSE, %d BSE instruments)",
-                len(session.nse_instruments or []), len(session.bse_instruments or []))
-    return {"ok": True}
+    # The mint-and-store itself lives in kite_auth, shared with the provider's
+    # own recovery path so a token minted after a rejection is stored exactly
+    # the same way this scheduled one is.
+    return kite_auth.refresh_and_store(get_settings())

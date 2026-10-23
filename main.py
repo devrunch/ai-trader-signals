@@ -90,6 +90,20 @@ async def _get_with_retry(url: str, headers: dict[str, str], *, what: str) -> ht
     return None
 
 
+def _refresh_kite_session_on_start() -> None:
+    """Never fatal: a login that fails must not stop this service coming up.
+    The charts fall back to yfinance, and the 06:20 IST job tries again."""
+    from app.market.providers import kite_auth
+    try:
+        if kite_auth.refresh_and_store(get_settings())["ok"]:
+            logger.info("Kite session minted on startup")
+        else:
+            logger.warning("Kite session could not be minted on startup — "
+                           "running on whatever token is stored")
+    except Exception:
+        logger.exception("Kite startup refresh raised")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Captured now, on the main thread, before KiteTickerClient.connect() can
@@ -120,6 +134,13 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("Scheduler failed to start — jobs will not run until this process restarts")
         scheduler = None
+
+    # Mint a Kite session on the way up, rather than inheriting whatever is
+    # stored. A box that was off at 06:20 IST, or a deploy that landed after
+    # the token expired, otherwise comes back serving no quotes and no charts
+    # until the next morning's run. Off the event loop: the login is blocking
+    # HTTP, and this is the thread pool bound just above.
+    asyncio.create_task(asyncio.to_thread(_refresh_kite_session_on_start))
 
     # Constructed unconditionally — the yfinance poll path (NASDAQ/NYSE/...)
     # needs no Kite token at all, so it must not be gated behind one.

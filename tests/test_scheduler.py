@@ -34,7 +34,8 @@ async def test_the_cadences_match_what_beat_ran():
         "reddit-sentiment": {"minute": "45", "hour": "1,3,5,7,9,11,13,15,17,19,21,23"},
         "market-overview-morning": {"minute": "30", "hour": "6", "day_of_week": "mon-fri"},
         "market-overview-evening": {"minute": "0", "hour": "18", "day_of_week": "mon-fri"},
-        "kite-session-refresh": {"minute": "0", "hour": "6"},
+        # Minted after Kite's 06:00 IST expiry sweep, not into it.
+        "kite-session-refresh": {"minute": "20", "hour": "6"},
         "paper-square-off": {"minute": "20", "hour": "15", "day_of_week": "mon-fri"},
     }
     for job_id, fields in expected.items():

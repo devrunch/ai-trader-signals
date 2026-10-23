@@ -36,8 +36,11 @@ SCHEDULE: dict[str, tuple[str, dict]] = {
     # And again before the US open, which the 06:30 run is too early for.
     "market-overview-evening": ("app.worker.jobs:generate_morning_brief",
                                 {"minute": 0, "hour": 18, "day_of_week": "mon-fri"}),
-    # Kite's access token expires around 06:00 IST.
-    "kite-session-refresh": ("app.worker.jobs:refresh_zerodha_session", {"minute": 0, "hour": 6}),
+    # Kite expires the access token at 06:00 IST, so this used to run INTO
+    # that sweep: the 06:00 login succeeded, stored a token, logged a success
+    # -- and the token was dead by 06:30, taking every quote and chart with
+    # it for the rest of the day. Minting after the sweep, not during it.
+    "kite-session-refresh": ("app.worker.jobs:refresh_zerodha_session", {"minute": 20, "hour": 6}),
     # Intraday means intraday: nothing is held overnight.
     "paper-square-off": ("app.worker.jobs:square_off_positions",
                          {"minute": 20, "hour": 15, "day_of_week": "mon-fri"}),

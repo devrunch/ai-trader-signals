@@ -26,13 +26,13 @@ def test_a_successful_login_is_pushed_to_nestjs():
     mock_refresh.assert_called_once()
     put_call = mock_put.call_args
     assert put_call.kwargs["json"] == {"accessToken": "tok_abc"}
-    assert result == {"ok": True}
+    assert result["ok"] is True
 
 
 def test_a_login_failure_is_logged_and_returned_not_raised():
     """The whole point: a failed refresh must not crash the beat worker or
     take down anything else it schedules."""
-    with patch("app.worker.jobs.kite_auth.refresh_session",
+    with patch("app.market.providers.kite_auth.refresh_session",
                side_effect=KiteAuthError("bad TOTP")):
         result = refresh_zerodha_session()
 

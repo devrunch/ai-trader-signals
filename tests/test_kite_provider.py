@@ -780,3 +780,74 @@ class TestHistoryWindowTimezone:
         assert len(nfo) == 1, "one row per underlying, not one per contract"
         assert nfo[0]["symbol"] == "NIFTY1!"
         assert any(r["exchange"] == "NSE" for r in results), "the index is still offered"
+
+
+class TestTokenRecovery:
+    """Kite rejecting the stored token used to cost the rest of the day.
+
+    The token expires on Kite's own clock, and a refresh landing inside that
+    window mints one that dies minutes later -- stored, logged as a success,
+    and dead. Every quote and chart then 404'd until the next morning's run.
+    """
+
+    def _provider(self, monkeypatch, store):
+        provider = _provider_with_token()
+        provider._instruments = {"NSE": {r["tradingsymbol"]: r for r in NSE_INSTRUMENTS
+                                         if r["instrument_type"] == "EQ"}, "BSE": {}}
+        provider._instruments_loaded_at = provider._now()
+        monkeypatch.setattr("app.market.providers.kite_provider.kite_auth.refresh_and_store", store)
+        # The new token is read back through the API, which _ensure_token
+        # calls -- stubbed, so the test covers recovery, not that fetch.
+        monkeypatch.setattr(type(provider), "_ensure_token", lambda self: None)
+        return provider
+
+    def test_a_rejected_token_is_replaced_and_the_call_retried(self, monkeypatch):
+        from kiteconnect.exceptions import TokenException
+
+        minted = []
+        good = {"NSE:RELIANCE": {"last_price": 1292.9,
+                                 "ohlc": {"open": 1279.8, "high": 1297.0, "low": 1275.3, "close": 1278.0}}}
+        provider = self._provider(monkeypatch, lambda s: (minted.append(1), {"ok": True})[1])
+        provider._kite.quote = MagicMock(side_effect=[TokenException("Incorrect `api_key`"), good])
+
+        result = provider._get_quote_sync("RELIANCE", "NSE")
+
+        assert result is not None and result["ltp"] == 1292.9
+        assert len(minted) == 1
+        assert provider._kite.quote.call_count == 2
+
+    def test_a_login_that_fails_does_not_mask_the_original_error(self, monkeypatch):
+        from kiteconnect.exceptions import TokenException
+
+        provider = self._provider(monkeypatch, lambda s: {"ok": False, "error": "bad TOTP"})
+        provider._kite.quote = MagicMock(side_effect=TokenException("Incorrect `api_key`"))
+
+        # Still the caller's "no data" path, not a raise -- same as before.
+        assert provider._get_quote_sync("RELIANCE", "NSE") is None
+        assert provider._kite.quote.call_count == 1   # not retried against a token it never got
+
+    def test_it_does_not_log_in_once_per_request(self, monkeypatch):
+        """A genuinely bad api_key would otherwise turn every request into a
+        login attempt. Kite's login is scripted against endpoints meant for a
+        browser; hammering it is how an account gets locked."""
+        from kiteconnect.exceptions import TokenException
+
+        minted = []
+        provider = self._provider(monkeypatch, lambda s: (minted.append(1), {"ok": True})[1])
+        provider._kite.quote = MagicMock(side_effect=TokenException("Incorrect `api_key`"))
+
+        for _ in range(5):
+            provider._get_quote_sync("RELIANCE", "NSE")
+
+        assert len(minted) == 1, f"minted {len(minted)} sessions for 5 failing requests"
+
+    def test_a_non_token_failure_never_triggers_a_login(self, monkeypatch):
+        """A rate limit or a network blip is not an expired token."""
+        from kiteconnect.exceptions import KiteException
+
+        minted = []
+        provider = self._provider(monkeypatch, lambda s: (minted.append(1), {"ok": True})[1])
+        provider._kite.quote = MagicMock(side_effect=KiteException("rate limited"))
+
+        assert provider._get_quote_sync("RELIANCE", "NSE") is None
+        assert minted == []

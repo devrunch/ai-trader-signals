@@ -124,3 +124,33 @@ def refresh_session(settings: Settings) -> KiteSession:
 
     logger.info("Zerodha session refreshed — user %s", result.get("user_name"))
     return KiteSession(access_token=access_token, nse_instruments=nse, bse_instruments=bse)
+
+
+def refresh_and_store(settings: Settings) -> dict[str, Any]:
+    """Mint a session and hand it to the API, which is where every service
+    reads the token from.
+
+    Shared by the daily job and by the provider's own recovery path, so a
+    token minted after a rejection is stored the same way the scheduled one
+    is -- a provider that fixed only its own in-memory copy would leave every
+    other process still holding the dead token.
+    """
+    try:
+        session = refresh_session(settings)
+    except KiteAuthError as e:
+        logger.error("Zerodha session refresh failed: %s", e)
+        return {"ok": False, "error": str(e)}
+    try:
+        resp = httpx.put(
+            f"{settings.api_service_url}/api/internal/broker/zerodha/session",
+            headers={"x-internal-key": settings.internal_api_key},
+            json={"accessToken": session.access_token},
+            timeout=10,
+        )
+        resp.raise_for_status()
+    except httpx.HTTPError as e:
+        logger.error("Zerodha session refreshed but the API write failed: %s", e)
+        return {"ok": False, "error": str(e)}
+    logger.info("Zerodha session refreshed and stored (%d NSE, %d BSE instruments)",
+                len(session.nse_instruments or []), len(session.bse_instruments or []))
+    return {"ok": True, "error": None}

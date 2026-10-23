@@ -25,9 +25,10 @@ from typing import Any
 import httpx
 import pandas as pd
 from kiteconnect import KiteConnect
-from kiteconnect.exceptions import KiteException
+from kiteconnect.exceptions import KiteException, TokenException
 
 from app.config import Settings
+from app.market.providers import kite_auth
 from app.market.contract import ProviderCapabilities, VolumeSource
 from app.market.intervals import clamp_days
 
@@ -37,6 +38,12 @@ logger = logging.getLogger(__name__)
 # None/[], the caller's "no data" path. Anything else is a bug in our own
 # code and is re-raised through logger.exception.
 _VENDOR_ERRORS = (KiteException, httpx.HTTPError, OSError, KeyError, ValueError, TypeError, IndexError)
+
+# Long enough that a genuinely bad api_key/secret cannot turn every request
+# into a login attempt, short enough that one expiry costs one failed call.
+# Kite's login is scripted against endpoints meant for a browser (see
+# kite_auth's module docstring); hammering it is how an account gets locked.
+_TOKEN_RECOVERY_COOLDOWN_SECONDS = 300
 
 _TOKEN_TTL_SECONDS = 300
 _INSTRUMENTS_TTL_SECONDS = 86400
@@ -181,6 +188,9 @@ class KiteProvider:
         self._settings = settings
         self._kite = KiteConnect(api_key=settings.zerodha_api_key)
         self._token_cached_at: float = 0.0
+        # When this provider last minted a session after a rejection. See
+        # _recover_token.
+        self._token_recovered_at: float = 0.0
         self._instruments: dict[str, dict[str, dict[str, Any]]] = {}
         self._instruments_loaded_at: float = 0.0
 
@@ -203,11 +213,46 @@ class KiteProvider:
         self._kite.set_access_token(token)
         self._token_cached_at = self._now()
 
+    def _call(self, what: str, fn):
+        """Run one Kite call, and mint a new session if Kite rejects the token.
+
+        The stored token can be dead while every process still holds it: it
+        expires on Kite's own clock, and a refresh that lands inside that
+        expiry window mints a token that dies minutes later. Waiting for the
+        next scheduled refresh then costs the rest of the day, which is what
+        it did -- every quote and chart 404ing from 06:30 IST onward with a
+        session that had been minted, stored and logged as a success.
+
+        The new token goes through the API store, so the other processes pick
+        it up on their own next read rather than each discovering the failure
+        separately.
+        """
+        try:
+            return fn()
+        except TokenException:
+            if not self._recover_token():
+                raise
+            logger.info("Kite rejected the stored token on %s — minted a new session, retrying", what)
+            return fn()
+
+    def _recover_token(self) -> bool:
+        now = self._now()
+        if now - self._token_recovered_at < _TOKEN_RECOVERY_COOLDOWN_SECONDS:
+            return False
+        # Stamped before the attempt, not after: a login that hangs or throws
+        # must still hold the cooldown shut.
+        self._token_recovered_at = now
+        if not kite_auth.refresh_and_store(self._settings)["ok"]:
+            return False
+        self._token_cached_at = 0.0          # force the next read to go out
+        self._ensure_token()
+        return True
+
     def _ensure_instruments(self) -> None:
         if self._instruments and self._now() - self._instruments_loaded_at < _INSTRUMENTS_TTL_SECONDS:
             return
         for exch in ("NSE", "BSE"):
-            rows = self._kite.instruments(exch)
+            rows = self._call(f"instruments({exch})", lambda: self._kite.instruments(exch))
             # `instrument_type == "EQ"` alone isn't enough: Kite tags some
             # index/benchmark listings (e.g. "NIFTY DIV OPPS 50") as EQ too,
             # and unlike every real tradeable ticker their tradingsymbol is a
@@ -233,13 +278,13 @@ class KiteProvider:
         # branch needs applies unchanged. Measured on the box: all 38,563 rows
         # keyed by tradingsymbol cost 35.8 MB against ~1 GB free, so the whole
         # segment is kept rather than guessing which underlyings matter.
-        nfo_rows = self._kite.instruments("NFO")
+        nfo_rows = self._call("instruments(NFO)", lambda: self._kite.instruments("NFO"))
         self._instruments["NFO"] = {
             r["tradingsymbol"]: r for r in nfo_rows
             if r.get("instrument_type") in ("FUT", "CE", "PE") and r.get("expiry")
         }
 
-        mcx_rows = self._kite.instruments("MCX")
+        mcx_rows = self._call("instruments(MCX)", lambda: self._kite.instruments("MCX"))
         self._instruments["MCX"] = {
             r["tradingsymbol"]: r for r in mcx_rows
             if r.get("instrument_type") == "FUT" and r.get("expiry")
@@ -358,7 +403,7 @@ class KiteProvider:
                 real_symbol = row["tradingsymbol"]
                 venue = str(row.get("exchange") or venue).upper()
             key = f"{venue}:{real_symbol}"
-            data = self._kite.quote(key)[key]
+            data = self._call(f"quote {key}", lambda: self._kite.quote(key))[key]
             ltp = float(data["last_price"])
             ohlc = data["ohlc"]
             prev_close = float(ohlc["close"])
@@ -425,8 +470,11 @@ class KiteProvider:
             from_date = to_date - timedelta(days=clamp_days(interval, days))
             kite_interval = _INTERVAL_MAP.get(interval, "15minute")
 
-            candles = self._kite.historical_data(
-                row["instrument_token"], from_date, to_date, kite_interval,
+            candles = self._call(
+                f"historical {symbol}/{exchange}",
+                lambda: self._kite.historical_data(
+                    row["instrument_token"], from_date, to_date, kite_interval,
+                ),
             )
             if not candles:
                 return None
