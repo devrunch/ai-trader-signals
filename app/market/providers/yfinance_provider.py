@@ -32,6 +32,23 @@ def _equity_ticker(symbol: str, exchange: str) -> str:
     return f"{symbol.upper()}{suffix}"
 
 
+# Kite's tradingsymbol for an index -> Yahoo's. An index is not an equity, so
+# the .NS/.BO suffix above does not apply to it: "NIFTY 50" became
+# "NIFTY 50.NS", which Yahoo cannot resolve. That made this provider useless
+# as a fallback for exactly the symbols it most needed to cover -- when Kite
+# blipped mid-session the chart and the agent got nothing, and the agent told
+# the user to check their data connectivity.
+#
+# Only the indices whose Yahoo ticker is known for certain. Guessing one
+# produces the same silent 404 this exists to fix.
+_INDEX_TICKER = {
+    "NIFTY 50": "^NSEI",
+    "NIFTY BANK": "^NSEBANK",
+    "INDIA VIX": "^INDIAVIX",
+    "SENSEX": "^BSESN",
+}
+
+
 # Yahoo's own exchange codes -> the four we actually support. Search returns
 # results from every exchange Yahoo lists (Frankfurt, Vienna, Warsaw, ETFs on
 # any of them); anything not in this map is dropped rather than shown as a
@@ -81,6 +98,11 @@ class YFinanceProvider:
         # US and other non-Indian exchanges use the bare ticker, no suffix
         if exchange.upper() not in ("NSE", "BSE"):
             return upper
+        # Before the equity suffix: an index carries Kite's own name, which
+        # is not a ticker on Yahoo at all. See _INDEX_TICKER.
+        mapped = _INDEX_TICKER.get(upper)
+        if mapped:
+            return mapped
         return _equity_ticker(symbol, exchange)
 
     def _get_quote_sync(self, symbol: str, exchange: str = "NSE") -> dict | None:

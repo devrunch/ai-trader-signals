@@ -68,6 +68,16 @@ def _provider_with_token() -> KiteProvider:
     return provider
 
 
+def _soon(days: int = 30) -> str:
+    """An expiry that is still ahead of today.
+
+    A fixed date stops being the front month the moment it passes, and
+    the test then fails for a reason that has nothing to do with the
+    behaviour it covers."""
+    from datetime import date, timedelta
+    return str(date.today() + timedelta(days=days))
+
+
 class TestGetQuote:
     def test_maps_kite_quote_shape_to_the_shared_contract(self):
         provider = _provider_with_token()
@@ -124,7 +134,7 @@ class TestGetQuote:
             "NFO": {"NIFTY26OCTFUT": {
                 "tradingsymbol": "NIFTY26OCTFUT", "name": "NIFTY", "exchange": "NFO",
                 "instrument_type": "FUT", "instrument_token": 12468226,
-                "expiry": "2026-10-27", "segment": "NFO-FUT",
+                "expiry": _soon(), "segment": "NFO-FUT",
             }},
         }
         provider._instruments_loaded_at = provider._now()
@@ -155,7 +165,7 @@ class TestGetQuote:
             "NFO": {"NIFTY26OCTFUT": {
                 "tradingsymbol": "NIFTY26OCTFUT", "name": "NIFTY", "exchange": "NFO",
                 "instrument_type": "FUT", "instrument_token": 12468226,
-                "expiry": "2026-10-27", "segment": "NFO-FUT",
+                "expiry": _soon(), "segment": "NFO-FUT",
             }},
         }
         provider._instruments_loaded_at = provider._now()
